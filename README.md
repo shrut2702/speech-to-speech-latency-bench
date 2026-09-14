@@ -26,15 +26,35 @@ Using the annotated endpoint means t=0 is a property of the audio file rather th
 
 Three cascade paths, increasing in how much overlaps:
 
-| Config | ASR | LLM to TTS |
+| Path | ASR | LLM to TTS |
 |---|---|---|
-| `cascade_batch` | waits for the full utterance | fully sequential |
-| `cascade_stream_gen` | waits for the full utterance | LLM streams, TTS starts on sentence 1 |
-| `cascade_stream_all` | runs during speech | LLM streams, TTS starts on sentence 1 |
+| `batch` | waits for the full utterance | fully sequential |
+| `stream_gen` | waits for the full utterance | LLM streams, TTS starts on chunk 1 |
+| `stream_all` | runs during speech | LLM streams, TTS starts on chunk 1 |
+
+Crossed with two TTS families, giving six cascade configs plus Moshi:
+
+|  | CosyVoice2 (AR) | F5-TTS (NAR) |
+|---|---|---|
+| `batch` | `cascade_batch_cosyvoice2` | `cascade_batch_f5` |
+| `stream_gen` | `cascade_stream_gen_cosyvoice2` | `cascade_stream_gen_f5` |
+| `stream_all` | `cascade_stream_all_cosyvoice2` | `cascade_stream_all_f5` |
+
+Each config names its TTS family, and the cascade refuses to run if the loaded backend reports a different one. Without that check a config could carry one family's name over the other family's numbers, which would invert the comparison the grid exists for.
 
 Plus `moshi` as the full-duplex baseline.
 
 Two notes on fairness. The streaming ASR config runs the **same Whisper weights** as the batch config, so the only difference is the streaming policy and the delta is attributable to it. And "streaming" means different things per TTS family: an AR codec-LM emits acoustic tokens continuously and the codec decodes incrementally, while a flow-matching model has nothing to stream and gets chunked on sentence boundaries instead. That asymmetry is a finding, not a defect in the grid.
+
+## One process, several GPUs
+
+Every stage is an object in one process, placed on its own card by a `devices:` block in the config. There is no service layer, no wire protocol and nothing to launch.
+
+The alternative was a stage per service, which is how you would deploy this for real. It buys dependency isolation and costs a network hop inside every stage number. A benchmark is a job rather than a production system, so the hop is pure measurement error and the isolation is a problem to solve only if the torch pins actually collide. If one day they do, the fix is a subprocess with its own venv for the offending stage, not a service mesh.
+
+vLLM takes `cuda:0` and offers no clean per-instance device argument, so the other stages sit above it. Placement is recorded into every trace, so a one-GPU run and a three-GPU run can never be compared by accident.
+
+The feeder stays in the harness throughout. It is simulating the microphone, so handing a stage a file path or a whole array would put us back to measuring throughput.
 
 ## Metrics
 
@@ -49,16 +69,31 @@ Two validity gates run automatically. `check_work_constant` fails the report if 
 ```bash
 pip install -r requirements.txt
 
-# trim, pad to a uniform tail, loudness-normalize, annotate the endpoint
-python scripts/prepare_clips.py --src raw/ --out data/clips --manifest data/manifest.jsonl
+# download the clip set, stratified by length, with reference text
+python scripts/fetch_clips.py --out raw
 
-python -m bench.runner --config configs/cascade_batch.yaml
-python -m bench.runner --config configs/cascade_stream_gen.yaml
-python -m bench.runner --config configs/cascade_stream_all.yaml
-python -m bench.runner --config configs/moshi.yaml
+# trim, pad to a uniform tail, loudness-normalize, annotate the endpoint
+python scripts/prepare_clips.py --src raw --out data/clips \
+    --manifest data/manifest.jsonl --refs raw/refs.json
+
+# check the harness against known delays. No GPU needed.
+python -m bench.runner --config configs/cascade_mock.yaml
+
+# the grid, one config at a time
+for c in configs/cascade_*_*.yaml configs/moshi.yaml; do
+    python -m bench.runner --config "$c"
+done
 
 python scripts/report.py results/*.jsonl
 ```
+
+Or the whole sweep on Modal as one job, which is what `modal_app.py` is for:
+
+```bash
+modal run modal_app.py
+```
+
+One container with several GPUs, not a function per stage: separate functions land in separate containers on separate machines, and that hop would sit inside the measurement. Weights cache to a Volume so they download once, traces are committed to a Volume per config so a crash keeps what already finished, and the timeout is raised because the feeder streams at 1x.
 
 Traces are committed; the tables regenerate from them.
 
@@ -86,21 +121,25 @@ One caveat to carry into any quality claim: this audio is synthesized. GSM8K is 
 
 The cascade's answer quality is its LLM's quality, so swapping the 4B for an 8B moves it while Moshi stays put. Nothing here measures an intrinsic property of "cascades" versus "end-to-end". The useful output is a latency-quality frontier across several cascade configurations and Moshi, not a two-row table.
 
-All cascade stages share one GPU, so they contend for SMs and bandwidth in a way separate services would not. This hurts the streaming paths most, since overlapping only pays off when stages genuinely run in parallel, which means the reported streaming win is a conservative estimate. Moshi is a single model and has no such contention, so the setup mildly disadvantages the cascade.
+Stage placement changes the answer, which is why `devices:` is recorded in every trace. Put the LLM and TTS on one card and they contend for SMs and bandwidth exactly when the streaming paths need them to overlap, so the streaming win reads lower than it should. Spread them and the cascade gets more hardware per session than Moshi, which runs as a single model on one card. Neither is the honest setup on its own: report GPUs per session alongside latency, and at concurrency above 1 report sessions per GPU at a latency target, which collapses both into one comparable number.
 
 ## Layout
 
 ```
 bench/
-  feeder.py       wall-clock audio streaming, the core of the methodology
-  trace.py        event log; metrics are derived, never computed inline
-  metrics.py      TTFA, stage breakdown, streaming health, validity gates
-  runner.py       config in, traces out
-  systems/        cascade.py, moshi.py behind one interface
+  feeder.py           wall-clock audio streaming, the core of the methodology
+  chunking.py         small first chunk, sentence-sized after
+  trace.py            event log; metrics are derived, never computed inline
+  metrics.py          TTFA, stage breakdown, streaming health, validity gates
+  runner.py           config in, traces out
+  stages.py           asr, llm and tts backends, plus mocks with known delays
+  systems/            cascade.py, moshi.py behind one interface
+modal_app.py          the whole sweep as one Modal job
 scripts/
+  fetch_clips.py      download the set from HuggingFace, stratified by length
   prepare_clips.py
   report.py
-configs/          one yaml per system variant
-data/             manifest plus prepared clips
-results/          committed traces
+configs/              one yaml per system variant
+data/                 manifest plus prepared clips
+results/              committed traces
 ```

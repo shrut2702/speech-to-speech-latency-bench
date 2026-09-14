@@ -8,7 +8,6 @@ tail is what a user notices.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import median
 from typing import Iterable
 
 import numpy as np
@@ -80,12 +79,9 @@ def trial_metrics(trace: Trace, underrun_gap_ms: float = 50.0) -> TrialMetrics:
 
     # The feeder falling behind means the host could not sustain real time, so
     # the trial says more about the machine than the pipeline.
-    end = trace.first(("feeder", "end"))
-    if end is not None:
-        lag = next(
-            (e.meta.get("max_lag_s", 0.0) for e in trace.all_of(("feeder", "end"))),
-            0.0,
-        )
+    ends = trace.all_of(("feeder", "end"))
+    if ends:
+        lag = ends[0].meta.get("max_lag_s", 0.0)
         m.feeder_max_lag_ms = lag * MS
         if lag > 0.05:
             m.ok = False
@@ -112,11 +108,9 @@ def trial_metrics(trace: Trace, underrun_gap_ms: float = 50.0) -> TrialMetrics:
             m.max_gap_ms = max(gaps)
             m.underruns = sum(1 for g in gaps if g > underrun_gap_ms)
 
-    tok = trace.first(LLM_LAST_TOKEN)
-    if tok is not None:
-        m.response_tokens = next(
-            (e.meta.get("n_tokens") for e in trace.all_of(LLM_LAST_TOKEN)), None
-        )
+    last_token = trace.all_of(LLM_LAST_TOKEN)
+    if last_token:
+        m.response_tokens = last_token[0].meta.get("n_tokens")
 
     return m
 

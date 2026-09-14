@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
@@ -66,9 +65,6 @@ class Trace:
         self.events.append(Event(stage=stage, event=event, t=t, meta=meta))
         return t
 
-    def mark_raw(self, stage: str, event: str, **meta: Any) -> float:
-        return self.mark((stage, event), **meta)
-
     def mark_at(self, stage_event: tuple[str, str], t: float, **meta: Any) -> float:
         """Records an event at an explicit monotonic time.
 
@@ -79,15 +75,6 @@ class Trace:
         stage, event = stage_event
         self.events.append(Event(stage=stage, event=event, t=t, meta=meta))
         return t
-
-    @contextmanager
-    def span(self, stage: str, name: str = "span", **meta: Any):
-        """Times a block, emitting `<name>_enter` and `<name>_exit`."""
-        self.mark_raw(stage, f"{name}_enter", **meta)
-        try:
-            yield
-        finally:
-            self.mark_raw(stage, f"{name}_exit", **meta)
 
     def first(self, stage_event: tuple[str, str]) -> float | None:
         stage, event = stage_event

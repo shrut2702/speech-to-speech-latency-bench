@@ -18,7 +18,7 @@ function prepare_clips.py applies later, so the buckets chosen here are the
 buckets that land in the manifest. Length matters: batch ASR decode cost grows
 with utterance length while streaming ASR barely moves.
 
-    python scripts/fetch_clips.py --out raw --per-source 15
+    python scripts/fetch_clips.py --out raw
 
 Writes raw wavs plus refs.json, an id to metadata sidecar consumed by
 prepare_clips.py --refs. Audio is not committed; this script regenerates it.
@@ -32,7 +32,6 @@ import io
 import json
 from pathlib import Path
 
-import numpy as np
 import soundfile as sf
 
 BUCKETS = ("short", "medium", "long")
@@ -93,21 +92,6 @@ def decode(cell):
     return (x.mean(axis=1) if x.ndim > 1 else x), sr
 
 
-def silence_floor(x, sr):
-    """Noise floor of the first 200ms, plus the fraction of exact zeros.
-
-    A crude provenance signal. Human recordings carry a noise floor; synthetic
-    speech is often digitally silent before the first word. Reported rather than
-    acted on, because ASR finds synthetic speech unrealistically easy, and that
-    matters for any quality claim drawn from this set.
-    """
-    head = x[: int(0.2 * sr)]
-    if not len(head):
-        return 0.0, 0.0
-    rms = float(np.sqrt((head.astype(np.float64) ** 2).mean() + 1e-20))
-    return 20 * np.log10(rms + 1e-20), float((head == 0).mean())
-
-
 def pick(rows, k):
     """The k clips closest to the bucket's median length.
 
@@ -120,22 +104,9 @@ def pick(rows, k):
     return sorted(rows, key=lambda r: (abs(r[3] - mid), r[0]))[:k]
 
 
-def scale_quota(quota, total):
-    """Scales a per-source bucket quota to `total` clips, keeping its shape."""
-    base = sum(quota.values())
-    if total == base:
-        return dict(quota)
-    want = {b: int(round(q * total / base)) for b, q in quota.items()}
-    drift = total - sum(want.values())
-    if drift:
-        want[max(want, key=lambda b: want[b])] += drift
-    return want
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="raw")
-    ap.add_argument("--per-source", type=int, default=15)
     ap.add_argument("--max-speech-s", type=float, default=20.0,
                     help="the feeder streams at 1x, so clip length is wall-clock cost")
     ap.add_argument("--min-speech-s", type=float, default=0.8)
@@ -154,7 +125,6 @@ def main():
     for src in SOURCES:
         cands = {b: [] for b in BUCKETS}
         rates = set()
-        floors = []
 
         for fname in src["files"]:
             print("downloading %s: %s %s" % (src["key"], src["repo"], fname))
@@ -176,8 +146,6 @@ def main():
                 dur = end / sr
                 if not (args.min_speech_s <= dur <= args.max_speech_s):
                     continue
-                dbfs, zfrac = silence_floor(x, sr)
-                floors.append(dbfs)
                 meta = {
                     "transcript": str(cols[src["transcript"]][i]),
                     "reference_answer": str(cols[src["answer"]][i]),
@@ -186,11 +154,9 @@ def main():
                 for k, col in src["extra"].items():
                     meta[k] = str(cols[col][i])
                 cid = "%s_%04d" % (src["key"], i)
-                cands[pc.bucket_for(dur)].append((cid, x[:end], sr, dur, meta, zfrac))
+                cands[pc.bucket_for(dur)].append((cid, x[:end], sr, dur, meta))
 
         print("  sample rates: %s" % sorted(rates))
-        if floors:
-            print("  pre-speech floor: median %.1f dBFS" % float(np.median(floors)))
         for b in BUCKETS:
             rows = cands[b]
             if rows:
@@ -206,40 +172,23 @@ def main():
 
         out.mkdir(parents=True, exist_ok=True)
 
-        want = scale_quota(src["quota"], args.per_source)
         taken = {}
         for b in BUCKETS:
-            taken[b] = pick(cands[b], want[b])
-            if len(taken[b]) < want[b]:
+            taken[b] = pick(cands[b], src["quota"][b])
+            if len(taken[b]) < src["quota"][b]:
                 print("  SHORTFALL: %s/%s has %d, wanted %d"
-                      % (src["key"], b, len(cands[b]), want[b]))
-
-        # Keep the per-source count whole even when a bucket ran dry, by topping
-        # up from whichever bucket still has unused candidates.
-        deficit = args.per_source - sum(len(v) for v in taken.values())
-        while deficit > 0:
-            spare = sorted(
-                BUCKETS,
-                key=lambda b: len(cands[b]) - len(taken[b]),
-                reverse=True,
-            )[0]
-            if len(cands[spare]) - len(taken[spare]) <= 0:
-                print("  cannot reach %d for %s" % (args.per_source, src["key"]))
-                break
-            taken[spare] = pick(cands[spare], len(taken[spare]) + 1)
-            deficit -= 1
+                      % (src["key"], b, len(cands[b]), src["quota"][b]))
 
         for b in BUCKETS:
-            for cid, x, sr, dur, meta, zfrac in sorted(taken[b], key=lambda r: r[0]):
+            for cid, x, sr, dur, meta in sorted(taken[b], key=lambda r: r[0]):
                 sf.write(out / (cid + ".wav"), x, sr)
                 meta = dict(meta)
                 meta["bucket_at_fetch"] = b
                 meta["speech_s"] = round(dur, 3)
                 refs[cid] = meta
                 picked_total += 1
-                print("  %s  %5.2fs  zeros=%3.0f%%  %.44s -> %.28s"
-                      % (cid, dur, zfrac * 100,
-                         meta["transcript"], meta["reference_answer"]))
+                print("  %s  %5.2fs  %.48s -> %.28s"
+                      % (cid, dur, meta["transcript"], meta["reference_answer"]))
         print()
 
     if args.survey_only:

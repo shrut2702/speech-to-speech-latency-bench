@@ -12,3 +12,6 @@ raw/
 *.pt
 *.ckpt
 *.safetensors
+
+# launch.sh writes per-service logs here
+logs/

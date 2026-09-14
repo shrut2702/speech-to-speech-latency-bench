@@ -10,7 +10,6 @@ which run produced which figure.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -18,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bench.metrics import TrialMetrics, check_work_constant, summarize, trial_metrics
+from bench.runner import load_manifest
 from bench.trace import load_traces
 
 FIELDS = [
@@ -28,24 +28,13 @@ FIELDS = [
 ]
 
 
-def load_manifest(path: Path) -> dict[str, dict]:
-    if not path.exists():
-        return {}
-    rows = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            r = json.loads(line)
-            rows[r["id"]] = r
-    return rows
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("traces", nargs="+")
     ap.add_argument("--manifest", default="data/manifest.jsonl")
     args = ap.parse_args()
 
-    manifest = load_manifest(Path(args.manifest))
+    manifest = {r["id"]: r for r in load_manifest(args.manifest)}
 
     metrics: list[TrialMetrics] = []
     gpus = set()

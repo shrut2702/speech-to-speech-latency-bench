@@ -12,7 +12,6 @@ import platform
 import subprocess
 from pathlib import Path
 
-import numpy as np
 import soundfile as sf
 import yaml
 
@@ -50,10 +49,6 @@ def build_system(cfg: dict) -> S2SSystem:
         from .systems.cascade import CascadeSystem
 
         return CascadeSystem(cfg)
-    if kind == "mock":
-        from .systems.mock import MockSystem
-
-        return MockSystem(cfg)
     if kind == "moshi":
         from .systems.moshi import MoshiSystem
 

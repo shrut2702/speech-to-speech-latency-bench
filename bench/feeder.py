@@ -57,7 +57,6 @@ class AudioFeeder:
         sample_rate: int,
         endpoint_sample: int,
         frame_ms: int = 20,
-        realtime: bool = True,
         silence_after_s: float = 0.0,
     ):
         if samples.ndim != 1:
@@ -71,7 +70,6 @@ class AudioFeeder:
         self.sr = sample_rate
         self.frame_len = int(round(sample_rate * frame_ms / 1000.0))
         self.endpoint_sample = endpoint_sample
-        self.realtime = realtime
         self.silence_after_s = silence_after_s
 
         self.t_start: float | None = None
@@ -114,15 +112,11 @@ class AudioFeeder:
         for i in range(self.n_frames):
             scheduled = self.t_start + (i * self.frame_len) / self.sr
 
-            if self.realtime:
-                delay = scheduled - time.monotonic()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                else:
-                    self.max_lag = max(self.max_lag, -delay)
+            delay = scheduled - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
             else:
-                # Still yield so consumers stay cooperative under asyncio.
-                await asyncio.sleep(0)
+                self.max_lag = max(self.max_lag, -delay)
 
             start = i * self.frame_len
             is_synthetic = i >= n_clip

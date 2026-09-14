@@ -14,7 +14,10 @@ frame_ms: 20
 silence_after_s: 20.0
 output_sample_rate: 24000
 
+devices:
+  moshi: cuda:0
+
 model:
+  backend: kyutai
   repo: kyutai/moshiko-pytorch-bf16
-  device: cuda
   max_response_s: 20

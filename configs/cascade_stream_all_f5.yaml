@@ -1,0 +1,62 @@
+# Path 3: ASR also runs while the user is still speaking, so when the endpoint
+# arrives only a short finalize remains. Does not make the LLM start earlier in
+# wall-clock terms; it moves ASR's compute to before t=0 so it stops counting.
+name: cascade_stream_all_f5
+system: cascade
+path: stream_all
+
+manifest: data/manifest.jsonl
+clips_dir: data/clips
+trials: 4
+frame_ms: 20
+# The mic keeps running while the user waits for an answer. Full-duplex models
+# need these frames to keep generating; the cascade ignores them. Systems end
+# the stream early by breaking out of their loop, so this is an upper bound,
+# not a cost paid on every trial.
+silence_after_s: 20.0
+output_sample_rate: 24000
+
+# One container, several GPUs, one process. Stages are objects on separate
+# devices rather than services behind a socket: a benchmark is a job, not a
+# production deployment, and a network hop between stages would land inside the
+# number being measured.
+#
+# vLLM takes cuda:0 and has no clean per-instance device argument, so the other
+# stages sit above it. Placement is recorded into every trace, so a one-GPU run
+# and a three-GPU run can never be compared by accident.
+devices:
+  llm: cuda:0
+  asr: cuda:1
+  tts: cuda:2
+
+asr:
+  backend: whisper-streaming
+  model: large-v3-turbo
+  compute_type: float16
+  # Same weights as the batch configs on purpose. Only the streaming policy
+  # differs, so the measured difference is attributable to it.
+  policy: local-agreement
+
+llm:
+  backend: vllm
+  model: Qwen/Qwen3-4B-Instruct
+  # Pinned so every config does identical work. If these drift, the comparison
+  # is void and scripts/report.py will say so.
+  temperature: 0.0
+  seed: 0
+  max_tokens: 96
+  system_prompt: "Answer in at most two sentences."
+
+tts:
+  family: nar
+  backend: f5
+  # Flow matching. Nothing to stream: the solver has to finish a chunk before
+  # any of it exists, so the first chunk's size sets time to first audio
+  # outright. This is the asymmetry the grid exists to expose, not a defect.
+  chunk_on: sentence
+  # Uneven on purpose. A small first chunk buys a low time to first audio;
+  # everything after it hides inside the playback of the chunk before, so it can
+  # be long enough to sound right. Worth sweeping, and it matters more for the
+  # NAR family, which has no token streaming to fall back on.
+  first_chunk_words: 4
+  max_chunk_words: 40

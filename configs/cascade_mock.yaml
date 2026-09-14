@@ -1,0 +1,51 @@
+# The cascade wired to stages with known delays and no models.
+#
+# This is how the harness gets checked without a GPU. You dial in the delays, so
+# you know what the report should say: 300 + 150 + 120 = 570ms to first audio in
+# the batch path, and far less in stream_gen because TTS starts on chunk one.
+# If the report disagrees, the measurement layer is wrong, not the pipeline.
+#
+# Switch `path` to compare. It already caught a pipeline reacting at end-of-
+# stream instead of at the endpoint, which read 1069ms against an expected 270.
+name: cascade_mock
+system: cascade
+path: stream_gen
+
+manifest: data/manifest.jsonl
+clips_dir: data/clips
+trials: 1
+frame_ms: 20
+silence_after_s: 3.0
+output_sample_rate: 24000
+
+devices:
+  llm: cpu
+  asr: cpu
+  tts: cpu
+
+asr:
+  backend: mock
+  delays_ms:
+    # What the finalize costs after the endpoint. This is the number stream_all
+    # exists to shrink: streaming ASR has already decoded most of the utterance
+    # by t=0, so drop it to ~80 when modelling that path. Leave it here and
+    # stream_all measures the same as stream_gen, correctly, because with a
+    # batch-speed finalize the two paths really are the same pipeline.
+    final: 300
+
+llm:
+  backend: mock
+  max_tokens: 96
+  system_prompt: "Answer in at most two sentences."
+  delays_ms:
+    first_token: 150
+    per_token: 12
+
+tts:
+  backend: mock
+  family: nar
+  first_chunk_words: 4
+  max_chunk_words: 40
+  rtf: 0.3
+  delays_ms:
+    first_chunk: 120
