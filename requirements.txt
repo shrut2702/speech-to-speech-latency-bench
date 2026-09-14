@@ -1,0 +1,13 @@
+# core harness
+numpy>=1.26
+soundfile>=0.12
+soxr>=0.5
+pyyaml>=6.0
+pytest>=8.0
+pytest-asyncio>=0.23
+
+# models (install as needed per config)
+# faster-whisper>=1.0
+# vllm>=0.6
+# moshi
+# torch

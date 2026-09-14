@@ -1,0 +1,38 @@
+# Path 3: ASR also runs while the user is still speaking, so when the endpoint
+# arrives only a short finalize remains. Does not make the LLM start earlier in
+# wall-clock terms; it moves ASR's compute to before t=0 so it stops counting.
+name: cascade_stream_all
+system: cascade
+path: stream_all
+
+manifest: data/manifest.jsonl
+clips_dir: data/clips
+trials: 4
+frame_ms: 20
+# The mic keeps running while the user waits for an answer. Full-duplex models
+# need these frames to keep generating; the cascade ignores them. Systems end
+# the stream early by breaking out of their loop, so this is an upper bound,
+# not a cost paid on every trial.
+silence_after_s: 20.0
+output_sample_rate: 24000
+
+asr:
+  backend: whisper-streaming
+  # Same weights as the batch config on purpose. Only the streaming policy
+  # differs, so the measured difference is attributable to it.
+  model: large-v3-turbo
+  compute_type: float16
+  policy: local-agreement
+
+llm:
+  backend: vllm
+  model: Qwen/Qwen3-4B-Instruct
+  temperature: 0.0
+  seed: 0
+  max_tokens: 96
+  system_prompt: "Answer in at most two sentences."
+
+tts:
+  family: ar
+  backend: cosyvoice2
+  chunk_on: sentence

@@ -64,11 +64,23 @@ Traces are committed; the tables regenerate from them.
 
 ## Clips
 
-Audio is not committed, for licensing reasons. `prepare_clips.py` takes whatever you point it at and produces the normalized set plus manifest.
+Audio is not committed, for licensing reasons. `fetch_clips.py` pulls the set from HuggingFace and `prepare_clips.py` normalizes it, so both regenerate from scratch.
 
-The set used here draws on the human-recorded subsets of [VoiceBench](https://github.com/matthewcym/voicebench) (`wildvoice`, `commoneval`), with [Full-Duplex-Bench](https://github.com/DanielLin94144/Full-Duplex-Bench) for turn-taking and barge-in. TTS-generated clips are avoided for anything touching quality: ASR finds them unrealistically easy, which erases the error-propagation failure mode that is the cascade's main structural weakness.
+45 clips from three sources, 15 each:
 
-Voice-assistant corpora are almost entirely short queries, so a handful of 10 to 15 second utterances are added separately. That bucket matters more than it looks: batch ASR cost scales with utterance length while streaming ASR barely moves, so without long clips the streaming win looks unimpressive and you draw the wrong conclusion.
+| source | short | medium | long | what it is |
+|---|---|---|---|---|
+| [`llama-questions`](https://huggingface.co/datasets/fixie-ai/llama-questions) | 10 | 5 | 0 | general knowledge, one-word answers |
+| [`URO-Bench/MLCpro-en`](https://huggingface.co/datasets/Honggao/URO-Bench) | 5 | 6 | 4 | arithmetic and science, sentence answers |
+| [`URO-Bench/Gsm8kEval`](https://huggingface.co/datasets/Honggao/URO-Bench) | 0 | 4 | 11 | multi-step word problems, worked answers |
+
+The per-source quotas are lopsided because no single source spans the range: llama-questions tops out below 5s, Gsm8kEval never drops below 4s, and MLCpro-en holds only four clips past 8s. Skewing the quotas is what makes the combined set come out at 15 per bucket, which is the distribution that actually matters.
+
+The long bucket matters more than it looks. Batch ASR decode cost grows with utterance length while streaming ASR barely moves, so a set of short queries makes the streaming win look unimpressive and you draw the wrong conclusion.
+
+Every clip carries the reference text on both sides: `transcript` is what was asked, `reference_answer` is what a correct response says. Latency alone cannot tell you whether a faster path got quieter about being wrong, and error propagation, where an ASR mistake becomes a wrong answer, is the cascade's main structural weakness. The Gsm8kEval rows add `reference_short`, the bare final number, which scores by string match instead of needing a judge model.
+
+One caveat to carry into any quality claim: this audio is synthesized. GSM8K is a text-only dataset and MLCpro-en is generated prompts, so neither has human recordings behind it. ASR finds synthetic speech easier than real microphone input, so measured WER reads optimistically low and the error-propagation effect is damped. Timing is unaffected, since the feeder only cares about duration and pacing.
 
 ## Reading the results honestly
 

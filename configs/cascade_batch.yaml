@@ -1,0 +1,35 @@
+# Path 1: nothing overlaps. Record, transcribe, generate, synthesize, play.
+# The deliberately naive baseline. Expect it to be bad; that is the point.
+name: cascade_batch
+system: cascade
+path: batch
+
+manifest: data/manifest.jsonl
+clips_dir: data/clips
+trials: 4
+frame_ms: 20
+# The mic keeps running while the user waits for an answer. Full-duplex models
+# need these frames to keep generating; the cascade ignores them. Systems end
+# the stream early by breaking out of their loop, so this is an upper bound,
+# not a cost paid on every trial.
+silence_after_s: 20.0
+output_sample_rate: 24000
+
+asr:
+  backend: faster-whisper
+  model: large-v3-turbo
+  compute_type: float16
+
+llm:
+  backend: vllm
+  model: Qwen/Qwen3-4B-Instruct
+  # Pinned so every config does identical work. If these drift, the comparison
+  # is void and scripts/report.py will say so.
+  temperature: 0.0
+  seed: 0
+  max_tokens: 96
+  system_prompt: "Answer in at most two sentences."
+
+tts:
+  family: ar          # ar | nar
+  backend: cosyvoice2

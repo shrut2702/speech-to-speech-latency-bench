@@ -1,0 +1,21 @@
+# Synthetic system for validating the harness without a GPU.
+# Delays are known, so the report's numbers can be checked against them.
+name: mock_fast
+system: mock
+manifest: data/manifest.jsonl
+clips_dir: data/clips
+trials: 3
+frame_ms: 20
+# The mic keeps running while the user waits for an answer. Full-duplex models
+# need these frames to keep generating; the cascade ignores them. Systems end
+# the stream early by breaking out of their loop, so this is an upper bound,
+# not a cost paid on every trial.
+silence_after_s: 20.0
+output_sample_rate: 24000
+n_chunks: 10
+n_tokens: 42
+delays_ms:
+  asr_final: 120
+  llm_first_token: 90
+  tts_first_chunk: 60
+  chunk_interval: 80
