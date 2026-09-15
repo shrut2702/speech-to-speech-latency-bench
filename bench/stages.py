@@ -212,28 +212,39 @@ class _WhisperStreamSession:
 
 
 class MockASR:
-    """Known delays, no model. Streaming leaves less to do at t=0, so its
-    finalize is the short one."""
+    """Known delays, no model.
+
+    `partial_every` emits a growing hypothesis every N frames, which is what
+    gives stream_all a first-partial time to measure. Leave it at 0 and the
+    session behaves like a batch backend that does nothing until the endpoint.
+    """
 
     TRANSCRIPT = "what is the capital of france"
 
     def __init__(self, cfg: dict, device: str = "cpu"):
         d = cfg.get("delays_ms", {})
         self.final_ms = int(d.get("final", 300))
+        self.partial_every = int(cfg.get("partial_every_frames", 0))
 
     async def load(self) -> None:
         return None
 
     def new_session(self) -> ASRSession:
-        return _MockASRSession(self.final_ms)
+        return _MockASRSession(self.final_ms, self.partial_every)
 
 
 class _MockASRSession:
-    def __init__(self, final_ms: int):
+    def __init__(self, final_ms: int, partial_every: int):
         self.final_ms = final_ms
+        self.partial_every = partial_every
+        self.frames = 0
 
     async def accept(self, samples: np.ndarray) -> str | None:
-        return None
+        self.frames += 1
+        if not self.partial_every or self.frames % self.partial_every:
+            return None
+        words = MockASR.TRANSCRIPT.split()
+        return " ".join(words[: min(len(words), self.frames // self.partial_every)])
 
     async def final(self) -> str:
         await asyncio.sleep(self.final_ms / 1000)

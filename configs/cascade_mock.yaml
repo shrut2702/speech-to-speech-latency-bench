@@ -25,6 +25,9 @@ devices:
 
 asr:
   backend: mock
+  # Frames between partial hypotheses. Only stream_all consumes these; set it to
+  # 0 and the mock behaves like a batch backend that does nothing until t=0.
+  partial_every_frames: 25
   delays_ms:
     # What the finalize costs after the endpoint. This is the number stream_all
     # exists to shrink: streaming ASR has already decoded most of the utterance

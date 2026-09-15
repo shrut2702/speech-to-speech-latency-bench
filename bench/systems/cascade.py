@@ -32,10 +32,14 @@ from ..chunking import ChunkPolicy
 from ..feeder import AudioFeeder
 from ..trace import (
     Trace,
+    ASR_START,
     ASR_FIRST_PARTIAL,
     ASR_FINAL,
+    LLM_START,
     LLM_FIRST_TOKEN,
+    LLM_SECOND_TOKEN,
     LLM_LAST_TOKEN,
+    TTS_START,
     TTS_FIRST_CHUNK,
     TTS_LAST_CHUNK,
     OUTPUT_FIRST_AUDIO,
@@ -105,18 +109,33 @@ class CascadeSystem(S2SSystem):
         """
         session = self.asr.new_session()
         saw_partial = False
+        started = False
+        # When transcription actually begins, which differs by path. Streaming
+        # starts on the first frame because its whole point is the work done
+        # before t=0. Batch only buffers during speech, so starting its clock at
+        # the first frame would report the user's speaking time as ASR cost.
+        incremental = self.path == "stream_all"
 
         async def on_frame(frame) -> None:
-            nonlocal saw_partial
+            nonlocal saw_partial, started
+            if incremental and not started:
+                started = True
+                trace.mark(ASR_START)
             partial = await session.accept(frame.samples)
-            if partial and not saw_partial:
+            # Only the incremental path has a meaningful partial. A batch
+            # backend that offers one is not doing the work early, and timing it
+            # against a finalize-time start would read as negative.
+            if incremental and partial and not saw_partial:
                 saw_partial = True
                 trace.mark(ASR_FIRST_PARTIAL)
 
         tail = await drain_to_endpoint(feeder, trace, on_frame)
 
+        if not incremental:
+            trace.mark(ASR_START)
         transcript = await session.final()
         trace.mark(ASR_FINAL, n_chars=len(transcript))
+        trace.artifacts["transcript"] = transcript
         return transcript, tail
 
     def _llm_params(self) -> dict:
@@ -138,13 +157,21 @@ class CascadeSystem(S2SSystem):
     ) -> AsyncIterator[AudioChunk]:
         """Nothing overlaps. Full response, then full synthesis, then audio."""
         parts: list[str] = []
+        trace.mark(LLM_START)
         async for token in self.llm.generate(transcript, **self._llm_params()):
             if not parts:
                 trace.mark(LLM_FIRST_TOKEN)
+            elif len(parts) == 1:
+                trace.mark(LLM_SECOND_TOKEN)
             parts.append(token)
         text = "".join(parts)
         trace.mark(LLM_LAST_TOKEN, n_tokens=len(parts), n_chars=len(text))
+        trace.artifacts["response"] = text
+        # Batch synthesizes the whole response in one call, so there is one
+        # chunk and it is the response.
+        trace.artifacts["tts_chunks"] = [text]
 
+        trace.mark(TTS_START)
         pieces = [a async for a in self._synth(text, 0, trace)]
         trace.mark(TTS_LAST_CHUNK)
         yield AudioChunk(
@@ -162,6 +189,11 @@ class CascadeSystem(S2SSystem):
         """
         tts_cfg = self.cfg.get("tts", {})
         chunks: asyncio.Queue = asyncio.Queue()
+        # Kept so the report can show exactly where the chunker cut. Chunk one
+        # sets time to first audio, so its text is the thing to look at when the
+        # number moves.
+        sent: list[str] = []
+        cut: list[str] = []
 
         async def produce_text() -> None:
             policy = ChunkPolicy(
@@ -169,19 +201,27 @@ class CascadeSystem(S2SSystem):
                 max_words=int(tts_cfg.get("max_chunk_words", 40)),
             )
             n = 0
+            trace.mark(LLM_START)
             try:
                 async for token in self.llm.generate(
                     transcript, **self._llm_params()
                 ):
                     if not n:
                         trace.mark(LLM_FIRST_TOKEN)
+                    elif n == 1:
+                        trace.mark(LLM_SECOND_TOKEN)
                     n += 1
+                    sent.append(token)
                     for chunk in policy.feed(token):
+                        cut.append(chunk)
                         chunks.put_nowait(chunk)
                 for chunk in policy.flush():
+                    cut.append(chunk)
                     chunks.put_nowait(chunk)
                 trace.mark(LLM_LAST_TOKEN, n_tokens=n)
             finally:
+                trace.artifacts["response"] = "".join(sent)
+                trace.artifacts["tts_chunks"] = list(cut)
                 chunks.put_nowait(None)
 
         producer = asyncio.create_task(produce_text())
@@ -203,6 +243,10 @@ class CascadeSystem(S2SSystem):
     ) -> AsyncIterator[np.ndarray]:
         if not text.strip():
             return
+        if index == 0:
+            # TTS_START is the first chunk handed over, so tts latency is
+            # measured from when synthesis could begin rather than from t=0.
+            trace.mark(TTS_START)
         first = True
         async for audio in self.tts.synth(text):
             if first and index == 0:

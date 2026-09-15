@@ -70,7 +70,11 @@ def run_bench(configs: list[str]) -> list[str]:
         print(f"=== {name}", flush=True)
         subprocess.run(
             [sys.executable, "-m", "bench.runner",
-             "--config", f"configs/{name}.yaml", "--out", out],
+             "--config", f"configs/{name}.yaml", "--out", out,
+             # Synthesized audio onto the Volume too. The trace already carries
+             # the transcript, the response and the chunks handed to TTS, so
+             # between them every trial can be listened to and read back.
+             "--audio-dir", "/results/audio"],
             cwd="/root", check=True,
         )
         written.append(out)

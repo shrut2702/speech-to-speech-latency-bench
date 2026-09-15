@@ -20,11 +20,32 @@ from bench.metrics import TrialMetrics, check_work_constant, summarize, trial_me
 from bench.runner import load_manifest
 from bench.trace import load_traces
 
-FIELDS = [
+# From the endpoint: what the user actually waits through.
+PIPELINE = [
     ("ttfa_ms", "time to first audio"),
+    ("e2e_ms", "end to end"),
     ("asr_final_ms", "asr final"),
     ("llm_first_token_ms", "llm first token"),
     ("tts_first_chunk_ms", "tts first chunk"),
+]
+
+# From each stage's own start, with the stages before it subtracted out.
+STAGES = [
+    ("asr_first_partial_ms", "asr first partial"),
+    ("asr_total_ms", "asr total"),
+    ("llm_ttft_ms", "llm ttft"),
+    ("llm_second_token_ms", "llm 2nd token"),
+    ("llm_total_ms", "llm total"),
+    ("tts_ttfa_ms", "tts first audio"),
+    ("tts_total_ms", "tts total"),
+]
+
+# AR families only, and unemitted until the codec-LM is split from its decoder.
+AR_STAGES = [
+    ("tts_first_token_ms", "tts first token"),
+    ("tts_tokens_total_ms", "tts tokens total"),
+    ("decoder_first_chunk_ms", "decoder first chunk"),
+    ("decoder_total_ms", "decoder total"),
 ]
 
 
@@ -60,19 +81,37 @@ def main() -> None:
     for m in metrics:
         by_config[m.config].append(m)
 
-    print("## Overall\n")
-    header = "| config | n | " + " | ".join(
-        f"{label} p50/p95" for _, label in FIELDS
-    ) + " |"
-    print(header)
-    print("|" + "---|" * (len(FIELDS) + 2))
-    for config, ms in sorted(by_config.items()):
-        cells = []
-        for field, _ in FIELDS:
-            s = summarize(ms, field)
-            cells.append(f"{s['p50']:.0f} / {s['p95']:.0f}")
-        n = summarize(ms, "ttfa_ms")["n"]
-        print(f"| {config} | {n} | " + " | ".join(cells) + " |")
+    def table(title: str, fields, note: str = "") -> None:
+        """One row per config, p50/p95 per field. Dashes where unmeasured.
+
+        A stage that never ran leaves its events unemitted, so the cell reads
+        as "not measured" rather than as zero milliseconds.
+        """
+        rows = []
+        for config, ms in sorted(by_config.items()):
+            cells = []
+            for field, _ in fields:
+                st = summarize(ms, field)
+                missing = st["n"] == 0 or st["p50"] != st["p50"]
+                cells.append("-" if missing else f"{st['p50']:.0f} / {st['p95']:.0f}")
+            if any(c != "-" for c in cells):
+                rows.append((config, summarize(ms, "ttfa_ms")["n"], cells))
+        if not rows:
+            return
+        print(f"\n## {title}\n")
+        if note:
+            print(f"{note}\n")
+        print("| config | n | " + " | ".join(f"{l} p50/p95" for _, l in fields) + " |")
+        print("|" + "---|" * (len(fields) + 2))
+        for config, n, cells in rows:
+            print(f"| {config} | {n} | " + " | ".join(cells) + " |")
+
+    table("Pipeline, from end of speech", PIPELINE)
+    table("Per stage, from each stage's own start", STAGES,
+          "Stage costs with everything before them subtracted out. This is the "
+          "view that says which millisecond to go delete.")
+    table("AR TTS internals", AR_STAGES,
+          "Codec-LM and decoder split. Empty until the split is wired.")
 
     # The averaged number hides the best finding. Streaming ASR saves little on
     # short utterances and a lot on long ones, and only this view shows it.

@@ -15,10 +15,20 @@ import numpy as np
 from .trace import (
     Trace,
     FEEDER_ENDPOINT,
+    ASR_START,
+    ASR_FIRST_PARTIAL,
     ASR_FINAL,
+    LLM_START,
     LLM_FIRST_TOKEN,
+    LLM_SECOND_TOKEN,
     LLM_LAST_TOKEN,
+    TTS_START,
+    TTS_FIRST_TOKEN,
+    TTS_LAST_TOKEN,
     TTS_FIRST_CHUNK,
+    TTS_LAST_CHUNK,
+    DECODER_FIRST_CHUNK,
+    DECODER_LAST_CHUNK,
     OUTPUT_FIRST_AUDIO,
     OUTPUT_CHUNK,
     OUTPUT_END,
@@ -35,11 +45,31 @@ class TrialMetrics:
     ok: bool
     reason: str = ""
 
+    # --- from the endpoint: what the user waits through ---------------------
     ttfa_ms: float | None = None            # the headline number
-    asr_final_ms: float | None = None       # all of these are from endpoint
+    e2e_ms: float | None = None             # endpoint to the last audio out
+    asr_final_ms: float | None = None
     llm_first_token_ms: float | None = None
     llm_last_token_ms: float | None = None
     tts_first_chunk_ms: float | None = None
+
+    # --- from each stage's own start: what that stage costs -----------------
+    # "how long did the LLM take" and "how long after the user stopped talking"
+    # are different questions. Only the second accumulates the stages before it,
+    # so a stage is profiled against its own clock.
+    asr_first_partial_ms: float | None = None   # streaming only, from ASR start
+    asr_total_ms: float | None = None           # ASR start to final transcript
+    llm_ttft_ms: float | None = None            # LLM start to first token
+    llm_second_token_ms: float | None = None    # first token to second, one
+                                                # decode step with a warm cache
+    llm_total_ms: float | None = None           # LLM start to last token
+    tts_ttfa_ms: float | None = None            # TTS start to first audio out
+    tts_total_ms: float | None = None           # TTS start to last audio out
+    # AR families only, and only once the codec-LM is split from its decoder.
+    tts_first_token_ms: float | None = None
+    tts_tokens_total_ms: float | None = None
+    decoder_first_chunk_ms: float | None = None
+    decoder_total_ms: float | None = None
 
     response_audio_s: float | None = None
     rtf: float | None = None                # generation time / audio produced
@@ -50,9 +80,18 @@ class TrialMetrics:
     response_tokens: int | None = None
 
 
-def _delta_ms(trace: Trace, event, base: float) -> float | None:
+def _delta_ms(trace: Trace, event, base: float | None) -> float | None:
     t = trace.first(event)
-    return None if t is None else (t - base) * MS
+    return None if t is None or base is None else (t - base) * MS
+
+
+def _span_ms(trace: Trace, start_event, end_event) -> float | None:
+    """Duration between two events, or None if either is missing.
+
+    Stages that never ran leave their events unemitted rather than zero, so a
+    missing number reads as "not measured" instead of "took no time".
+    """
+    return _delta_ms(trace, end_event, trace.first(start_event))
 
 
 def trial_metrics(trace: Trace, underrun_gap_ms: float = 50.0) -> TrialMetrics:
@@ -67,10 +106,23 @@ def trial_metrics(trace: Trace, underrun_gap_ms: float = 50.0) -> TrialMetrics:
         return m
 
     m.ttfa_ms = _delta_ms(trace, OUTPUT_FIRST_AUDIO, base)
+    m.e2e_ms = _delta_ms(trace, OUTPUT_END, base)
     m.asr_final_ms = _delta_ms(trace, ASR_FINAL, base)
     m.llm_first_token_ms = _delta_ms(trace, LLM_FIRST_TOKEN, base)
     m.llm_last_token_ms = _delta_ms(trace, LLM_LAST_TOKEN, base)
     m.tts_first_chunk_ms = _delta_ms(trace, TTS_FIRST_CHUNK, base)
+
+    m.asr_first_partial_ms = _span_ms(trace, ASR_START, ASR_FIRST_PARTIAL)
+    m.asr_total_ms = _span_ms(trace, ASR_START, ASR_FINAL)
+    m.llm_ttft_ms = _span_ms(trace, LLM_START, LLM_FIRST_TOKEN)
+    m.llm_second_token_ms = _span_ms(trace, LLM_FIRST_TOKEN, LLM_SECOND_TOKEN)
+    m.llm_total_ms = _span_ms(trace, LLM_START, LLM_LAST_TOKEN)
+    m.tts_ttfa_ms = _span_ms(trace, TTS_START, TTS_FIRST_CHUNK)
+    m.tts_total_ms = _span_ms(trace, TTS_START, TTS_LAST_CHUNK)
+    m.tts_first_token_ms = _span_ms(trace, TTS_START, TTS_FIRST_TOKEN)
+    m.tts_tokens_total_ms = _span_ms(trace, TTS_START, TTS_LAST_TOKEN)
+    m.decoder_first_chunk_ms = _span_ms(trace, TTS_FIRST_TOKEN, DECODER_FIRST_CHUNK)
+    m.decoder_total_ms = _span_ms(trace, TTS_FIRST_TOKEN, DECODER_LAST_CHUNK)
 
     if m.ttfa_ms is None:
         m.ok = False

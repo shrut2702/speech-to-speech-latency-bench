@@ -12,6 +12,7 @@ import platform
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import soundfile as sf
 import yaml
 
@@ -41,6 +42,23 @@ def gpu_name() -> str:
         return out.stdout.strip().splitlines()[0]
     except Exception:
         return "unknown"
+
+
+def save_audio(root: Path, trace: Trace, chunks: list) -> None:
+    """Writes one trial's output audio, one wav per chunk plus the whole thing.
+
+    The per-chunk files are the point for the streaming paths: they show what
+    arrived when, which is what the inter-chunk gaps in the report are measuring.
+    Batch produces a single chunk, so the two files are the same audio.
+    """
+    if not chunks:
+        return
+    out = root / trace.config / trace.clip_id / f"trial{trace.trial}"
+    out.mkdir(parents=True, exist_ok=True)
+    sr = chunks[0].sample_rate
+    for i, c in enumerate(chunks):
+        sf.write(out / f"chunk_{i:03d}.wav", c.samples, c.sample_rate)
+    sf.write(out / "full.wav", np.concatenate([c.samples for c in chunks]), sr)
 
 
 def build_system(cfg: dict) -> S2SSystem:
@@ -92,6 +110,10 @@ async def run_config(cfg: dict, out_path: Path) -> None:
 
     await system.warmup(lambda: make_feeder(manifest[0]))
 
+    # Optional. On Modal point this at the results Volume so the audio survives
+    # the container. Off by default because a full sweep is a lot of wav files.
+    audio_dir = Path(cfg["audio_dir"]) if cfg.get("audio_dir") else None
+
     writer = TraceWriter(out_path)
     for row in manifest:
         for trial in range(trials):
@@ -101,8 +123,15 @@ async def run_config(cfg: dict, out_path: Path) -> None:
                 trial=trial,
                 env=env,
             )
-            async for _chunk in system.run(make_feeder(row), trace):
-                pass  # a real consumer would play or save these
+            produced: list = []
+            async for chunk in system.run(make_feeder(row), trace):
+                if audio_dir is not None:
+                    produced.append(chunk)
+            # Written after the trial, never during it. Synthesis is being timed
+            # to the millisecond and a disk write inside the loop would land in
+            # the inter-chunk gaps.
+            if audio_dir is not None:
+                save_audio(audio_dir, trace, produced)
             writer.write(trace)
             print(f"{cfg['name']} {row['id']} trial {trial + 1}/{trials}")
 
@@ -113,9 +142,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", default=None, help="defaults to results/<name>.jsonl")
+    ap.add_argument("--audio-dir", default=None,
+                    help="save output audio here; overrides audio_dir in the config")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    if args.audio_dir:
+        cfg["audio_dir"] = args.audio_dir
     out = Path(args.out) if args.out else Path("results") / f"{cfg['name']}.jsonl"
     asyncio.run(run_config(cfg, out))
 

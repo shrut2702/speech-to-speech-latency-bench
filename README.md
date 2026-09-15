@@ -58,9 +58,57 @@ The feeder stays in the harness throughout. It is simulating the microphone, so 
 
 ## Metrics
 
-Headline is time to first audio, measured from the endpoint, reported as p50/p95/p99. Never means.
+Percentiles only, p50/p95/p99. Never means: the tail is what a user notices.
 
-Alongside it: per-stage first-output (ASR finalize, LLM first token, TTS first chunk), real-time factor, inter-chunk gaps and underruns, and behaviour at 1, 2, 4 and 8 concurrent sessions.
+Everything is measured twice, against two different clocks, because "how long after the user stopped talking" and "how long did that stage take" are different questions and only the first accumulates the stages before it.
+
+**From the endpoint** — what the user sits through:
+
+| metric | span |
+|---|---|
+| time to first audio | endpoint → first audio out |
+| end to end | endpoint → last audio out |
+| asr final | endpoint → final transcript |
+| llm first token | endpoint → first token |
+| tts first chunk | endpoint → first synthesized chunk |
+
+**From each stage's own start** — what that stage costs, with everything before it subtracted out. This is the view that says which millisecond to go delete:
+
+| metric | span | note |
+|---|---|---|
+| asr first partial | ASR start → first partial | streaming only; batch produces none |
+| asr total | ASR start → final transcript | batch starts at the endpoint, streaming at the first frame, so this reads as transcription cost for one and wall-clock-since-speech for the other |
+| llm ttft | LLM start → first token | dominated by prefill |
+| llm 2nd token | first token → second token | one decode step with a warm KV cache, which is the only honest read on per-token cost |
+| llm total | LLM start → last token | |
+| tts first audio | TTS start → first audio out | |
+| tts total | TTS start → last audio out | |
+
+**AR TTS internals**, for the codec-LM family only: time to first acoustic token, time for the whole token stream, and the decoder's time to first chunk and to the whole response. The event names exist and `report.py` prints the table when they appear, but nothing emits them yet: separating CosyVoice2's LM from its flow decoder and vocoder needs internals rather than its public API, which streams them together. Until that is wired the column is empty rather than guessed at.
+
+Alongside all of it: real-time factor, inter-chunk gaps, underruns, and behaviour at 1, 2, 4 and 8 concurrent sessions.
+
+## What each trial keeps
+
+A latency number without the output that produced it cannot be checked for whether speed cost accuracy, so every trial stores what it actually made.
+
+Text rides in the trace itself, since that is already one JSON record per trial:
+
+- `artifacts.transcript` — what ASR heard, scored against the manifest's reference text
+- `artifacts.response` — the LLM's full response
+- `artifacts.tts_chunks` — the chunks handed to TTS, in order. Chunk one sets time to first audio, so this is what to read when that number moves. Batch has a single chunk and it is the whole response.
+
+Audio is written separately when `audio_dir` is set, one directory per trial:
+
+```
+audio/<config>/<clip_id>/trial<N>/chunk_000.wav   as it arrived
+                                 chunk_001.wav
+                                 full.wav          the whole response
+```
+
+For the streaming paths the per-chunk files are the point: they are what the inter-chunk gap and underrun metrics are measuring, made listenable. Batch produces one chunk, so the two files hold the same audio.
+
+Both go to the Modal results Volume, which `modal_app.py` commits after every config so a crash keeps whatever already finished. The write happens after the trial ends, never inside it — a disk write mid-stream would land in the gaps being measured.
 
 Two validity gates run automatically. `check_work_constant` fails the report if the LLM produced different response lengths across configs, since then the configs did different amounts of work and the latencies are not comparable. And any trial where the feeder fell more than 50ms behind schedule is discarded, because it describes a loaded host rather than a pipeline.
 

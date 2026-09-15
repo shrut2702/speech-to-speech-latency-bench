@@ -24,11 +24,30 @@ FEEDER_START = ("feeder", "start")
 FEEDER_ENDPOINT = ("feeder", "endpoint")   # t=0 for every latency metric
 FEEDER_END = ("feeder", "end")
 
+# Stage starts. Every stage-internal duration is measured from its own start
+# rather than from the endpoint, because "how long did the LLM take" and "how
+# long after the user stopped talking" are different questions and only the
+# second one accumulates the stages before it.
+ASR_START = ("asr", "start")               # first frame fed
 ASR_FIRST_PARTIAL = ("asr", "first_partial")
 ASR_FINAL = ("asr", "final")
 
+LLM_START = ("llm", "start")
 LLM_FIRST_TOKEN = ("llm", "first_token")
+# The gap from first to second token is one decode step with a warm KV cache.
+# Prefill dominates the first token, so this is the only honest read on
+# per-token cost.
+LLM_SECOND_TOKEN = ("llm", "second_token")
 LLM_LAST_TOKEN = ("llm", "last_token")
+
+TTS_START = ("tts", "start")
+# AR families only: the codec-LM emits acoustic tokens, which a decoder then
+# turns into audio. Splitting these needs CosyVoice2 internals rather than its
+# public API, so today they are unemitted and the metrics read None.
+TTS_FIRST_TOKEN = ("tts", "first_token")
+TTS_LAST_TOKEN = ("tts", "last_token")
+DECODER_FIRST_CHUNK = ("decoder", "first_chunk")
+DECODER_LAST_CHUNK = ("decoder", "last_chunk")
 
 TTS_FIRST_CHUNK = ("tts", "first_chunk")
 TTS_LAST_CHUNK = ("tts", "last_chunk")
@@ -58,6 +77,11 @@ class Trace:
     events: list[Event] = field(default_factory=list)
     # Recorded so results from different hardware are never silently compared.
     env: dict[str, Any] = field(default_factory=dict)
+    # What the pipeline actually produced this trial: the transcript, the
+    # response, and the chunks handed to TTS. They ride in the trace because it
+    # is already written per trial, and because a latency number without the
+    # output it produced cannot be checked for whether speed cost accuracy.
+    artifacts: dict[str, Any] = field(default_factory=dict)
 
     def mark(self, stage_event: tuple[str, str], **meta: Any) -> float:
         stage, event = stage_event
