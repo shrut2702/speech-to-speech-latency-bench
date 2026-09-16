@@ -268,7 +268,7 @@ class VLLMEngine:
     """
 
     def __init__(self, cfg: dict, device: str = "cuda:0"):
-        self.model = cfg.get("model", "Qwen/Qwen3-4B-Instruct")
+        self.model = cfg.get("model", "Qwen/Qwen3-4B-Instruct-2507")
         self.max_model_len = int(cfg.get("max_model_len", 2048))
         self.gpu_frac = float(cfg.get("gpu_memory_utilization", 0.90))
         self.dtype = cfg.get("dtype", "bfloat16")
