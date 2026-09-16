@@ -115,6 +115,8 @@ Two validity gates run automatically. `check_work_constant` fails the report if 
 ## Usage
 
 ```bash
+# local side only: clip prep, driving a Modal run, reading results back.
+# The models install inside the container, from requirements-models.txt.
 pip install -r requirements.txt
 
 # download the clip set, stratified by length, with reference text

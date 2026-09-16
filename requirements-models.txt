@@ -1,0 +1,15 @@
+# Container side. Installed by the Dockerfile, never on your laptop.
+#
+# Everything runs in one process in one container, so these share an
+# environment. If the torch pins collide, split only the offending stage into a
+# subprocess with its own venv rather than reintroducing a service layer.
+-r requirements.txt
+
+faster-whisper>=1.0
+vllm>=0.6
+transformers>=4.51
+moshi>=0.2
+torch>=2.4
+# f5-tts>=1.0
+# cosyvoice2 installs from the CosyVoice repo, not PyPI
+# whisper-streaming is a repo: clone ufal/whisper_streaming onto PYTHONPATH
