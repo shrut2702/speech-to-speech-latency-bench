@@ -1,10 +1,11 @@
-"""CosyVoice2 zero-shot inference on Modal. A spike, not part of the harness.
+"""CosyVoice2 inference on Modal. A spike, not part of the harness.
 
-    modal run research/modal_cosyvoice2.py
-    modal run research/modal_cosyvoice2.py --text "hello there" --stream
+    modal run research/modal_cosyvoice2.py --stream
+    modal run research/modal_cosyvoice2.py --stream --warmup
+    modal run research/modal_cosyvoice2.py --stream --warmup --split
 
-Point of this file: get CosyVoice2 actually running once, see what its API hands
-back, and time the first chunk. The harness can then wire it with no surprises.
+Point of this file: get CosyVoice2 running, time the LM and the decoder apart,
+and see what a second GPU is worth. Findings live in cosyvoice2-profile.md.
 
 Install notes, because they are the only hard part:
   - CosyVoice is a repo, not a pip package, and needs its Matcha-TTS submodule
@@ -47,8 +48,94 @@ cache = modal.Volume.from_name("s2s-models", create_if_missing=True)
 out = modal.Volume.from_name("s2s-results", create_if_missing=True)
 
 
-@app.function(gpu="A10G", volumes={"/cache": cache, "/out": out}, timeout=3600)
-def synth(text: str, stream: bool, prompt_wav: str, prompt_text: str) -> list[str]:
+def instrument(cosyvoice, events: list) -> None:
+    """Times the LM and the decoder apart.
+
+    Streaming runs the LM in a background thread while the main thread turns
+    already-emitted tokens into audio, so the two overlap on one GPU. The public
+    API hands back finished audio and hides which of them the time went to.
+
+      model.llm.inference  text -> speech tokens, autoregressive
+      model.token2wav      speech tokens -> mel -> waveform, flow + vocoder
+    """
+    import time
+
+    model = cosyvoice.model
+    assert hasattr(model, "token2wav"), f"no token2wav on {type(model).__name__}"
+
+    original_llm = model.llm.inference
+    original_token2wav = model.token2wav
+
+    def timed_llm(*args, **kwargs):
+        n = 0
+        for token in original_llm(*args, **kwargs):
+            n += 1
+            if n == 1:
+                events.append(("llm first token", time.monotonic()))
+            yield token
+        events.append((f"llm last token ({n})", time.monotonic()))
+
+    def timed_token2wav(*args, **kwargs):
+        events.append(("decoder start", time.monotonic()))
+        try:
+            return original_token2wav(*args, **kwargs)
+        finally:
+            events.append(("decoder end", time.monotonic()))
+
+    model.llm.inference = timed_llm
+    model.token2wav = timed_token2wav
+
+
+def split_devices(cosyvoice, decoder_device: str = "cuda:1") -> None:
+    """Puts the flow decoder and vocoder on a second card.
+
+    The LM and the decoder overlap during streaming, so they contend for the
+    same SMs. This measures what separating them is worth rather than inferring
+    it from the ~5% gap between a contended decoder pass and the uncontended
+    final one.
+
+    The awkward part: CosyVoice2Model keeps a single `self.device` and both the
+    LM thread and token2wav read it. Swapping it around a call would race, since
+    the LM keeps generating while token2wav runs. So `device` becomes
+    thread-local. The main thread, which runs token2wav, sees the decoder card;
+    the background LM thread keeps seeing the original.
+    """
+    import threading
+
+    import torch
+
+    model = cosyvoice.model
+    base = torch.device(model.device)
+    decoder = torch.device(decoder_device)
+
+    model.flow.to(decoder)
+    model.hift.to(decoder)
+
+    local = threading.local()
+    # A property on the class is a data descriptor, so it takes precedence over
+    # the instance attribute that is already set.
+    type(model).device = property(lambda self: getattr(local, "device", base))
+
+    original = model.token2wav
+
+    def on_decoder_card(*args, **kwargs):
+        local.device = decoder
+        try:
+            return original(*args, **kwargs)
+        finally:
+            local.device = base
+
+    model.token2wav = on_decoder_card
+    print(f"llm on {base}, decoder on {decoder}", flush=True)
+
+
+# Two cards so the split can be measured. Without --split the second one idles,
+# which keeps both arms of the comparison on one image.
+@app.function(gpu="A10G:2", volumes={"/cache": cache, "/out": out}, timeout=3600)
+def synth(
+    text: str, stream: bool, prompt_wav: str, prompt_text: str,
+    warmup: bool, split: bool,
+) -> list[str]:
     import time
 
     import torchaudio
@@ -58,20 +145,29 @@ def synth(text: str, stream: bool, prompt_wav: str, prompt_text: str) -> list[st
 
     model_dir = snapshot_download(MODEL, local_dir=f"/cache/{MODEL}")
     cosyvoice = CosyVoice2(model_dir, load_jit=False, load_trt=False, fp16=False)
-    
-    # Throwaway pass first. The first inference pays for CUDA kernel selection,
-    # lazy module init and the text frontend building its FSTs, which is seconds
-    # and has nothing to do with synthesis. Without this the first chunk reads
-    # around 8s and the per-chunk RTF falls run-long as the model warms, which
-    # is a warmup curve being mistaken for a latency measurement.
-    for _ in cosyvoice.inference_cross_lingual("Warming up.", prompt_wav, stream=True):
-        pass
-    print("warmed", flush=True)
+
+    if split:
+        split_devices(cosyvoice)
+
+    if warmup:
+        # The first inference pays for CUDA kernel selection, lazy module init
+        # and the text frontend building its FSTs. Seconds, and nothing to do
+        # with synthesis. Without it the first chunk reads around 4s instead of
+        # 1.7s and the per-chunk RTF falls run-long, which is a warmup curve
+        # being mistaken for a latency measurement.
+        for _ in cosyvoice.inference_cross_lingual(
+            "Warming up.", prompt_wav, stream=True
+        ):
+            pass
+        print("warmed", flush=True)
+
+    events: list = []
+    instrument(cosyvoice, events)
 
     t0 = time.monotonic()
     paths = []
-    # The reference goes in as a path, not a loaded tensor: the frontend wants it
-    # at both 16k and 24k and does its own reading.
+    # The reference goes in as a path, not a loaded tensor: the frontend wants
+    # it at both 16k and 24k and does its own reading.
     #
     # Zero-shot clones the reference voice and needs its transcript.
     # Cross-lingual is the same clone with the target in another language, so it
@@ -86,13 +182,21 @@ def synth(text: str, stream: bool, prompt_wav: str, prompt_text: str) -> list[st
     for i, chunk in enumerate(gen):
         audio = chunk["tts_speech"]
         dur = audio.shape[-1] / cosyvoice.sample_rate
-        print(f"chunk {i}: {(time.monotonic() - t0) * 1000:7.0f} ms, {dur:.2f}s audio",
-              flush=True)
+        events.append((f"chunk {i} out ({dur:.2f}s audio)", time.monotonic()))
         path = f"/out/cosyvoice2_{i:03d}.wav"
         torchaudio.save(path, audio, cosyvoice.sample_rate)
         paths.append(path)
 
-    print(f"total {(time.monotonic() - t0) * 1000:.0f} ms, {len(paths)} chunks")
+    total = (time.monotonic() - t0) * 1000
+    # Printed at the end, not as they happen. The LM runs on another thread, so
+    # inline prints would interleave the two and misrepresent the order.
+    print("\n--- timeline, ms from synthesis start ---", flush=True)
+    previous = t0
+    for label, when in sorted(events, key=lambda e: e[1]):
+        print(f"{(when - t0) * 1000:8.0f}  (+{(when - previous) * 1000:6.0f})  {label}")
+        previous = when
+    print(f"total {total:.0f} ms, {len(paths)} chunks", flush=True)
+
     out.commit()
     return paths
 
@@ -112,5 +216,8 @@ def main(
     # up the accent. Pass an English wav plus its transcript for a clean voice.
     prompt_wav: str = f"{REPO}/asset/zero_shot_prompt.wav",
     prompt_text: str = "",
+    warmup: bool = False,
+    # Flow decoder and vocoder onto cuda:1, LM stays on cuda:0.
+    split: bool = False,
 ):
-    print("\n".join(synth.remote(text, stream, prompt_wav, prompt_text)))
+    print("\n".join(synth.remote(text, stream, prompt_wav, prompt_text, warmup, split)))
