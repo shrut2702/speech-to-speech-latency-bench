@@ -379,15 +379,11 @@ class CosyVoice2TTS:
         self.sample_rate = 24000
         self.device = device
         self.model = None
-        self.prompt_speech = None
 
     async def load(self) -> None:
         from cosyvoice.cli.cosyvoice import CosyVoice2
-        from cosyvoice.utils.file_utils import load_wav
 
         self.model = CosyVoice2(self.model_dir, load_jit=False, load_trt=False)
-        if self.prompt_wav:
-            self.prompt_speech = load_wav(self.prompt_wav, 16000)
 
     async def synth(self, text: str) -> AsyncIterator[np.ndarray]:
         queue: asyncio.Queue = asyncio.Queue()
@@ -397,8 +393,10 @@ class CosyVoice2TTS:
             # Blocking generator, so it runs off the event loop and pieces are
             # handed over as they appear rather than all at the end.
             try:
+                # The reference goes in as a path: the frontend resamples it to
+                # both 16k and 24k itself, so it does its own reading.
                 for out in self.model.inference_zero_shot(
-                    text, self.prompt_text, self.prompt_speech, stream=True
+                    text, self.prompt_text, self.prompt_wav, stream=True
                 ):
                     audio = out["tts_speech"].cpu().numpy().reshape(-1)
                     loop.call_soon_threadsafe(queue.put_nowait, audio)
