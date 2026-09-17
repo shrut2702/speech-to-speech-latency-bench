@@ -198,7 +198,7 @@ through CPU to cross the process boundary.
 | streaming, processes | 19.8 | 6014 ms | 1028 ms |
 | **streaming, processes, second GPU** | **16.6** | **~5200 ms** | **988 ms** |
 
-**16.6 against an unloaded 15.6.** The gap was 8.0 ms per token at the start and
+**16.6 against an unloaded (non-streaming) 15.6.** The gap was 8.0 ms per token at the start and
 is now 1.0, so roughly 87% of the stall is gone and the LM runs at close to the
 rate it manages with nothing else in the process.
 
@@ -238,23 +238,3 @@ enough to free that the trade stops being a trade.
 (*The first three rows are one-GPU runs, subtracted from 5346 ms. The last uses
 two cards, so it is subtracted from the two-card non-streaming run at 4949 ms.
 Comparing it against the one-card figure would credit the second GPU twice.)
-
-The benchmark should quote the first of these, since it is what CosyVoice2
-does out of the box. The second belongs beside it as a labelled variant.
-
-## What to carry into the harness
-
-1. Warm up before measuring. `S2SSystem.warmup()` already runs two throwaway
-   trials, which covers it.
-2. A second GPU for the TTS decoder is worth nothing on its own and hurts. It
-   only pays once the decoder is in a separate process, and then it pays well.
-   Budget the pair or neither.
-3. Report the throughput cost of streaming alongside the latency win. As shipped
-   it is 1.8 s on a 5.3 s utterance. The comparison has a real price on the
-   other side, even if the optimised variant nearly erases it.
-4. Pin the TTS sampling, or record the speech token count per trial. Output
-   length varies about 6% run to run for identical input, which moves total time
-   and RTF for reasons unrelated to latency. `check_work_constant` won't catch
-   it, since it only looks at LLM tokens.
-5. Steady RTF is around 0.5 to 0.65 on an A10G with nothing else on the card.
-   Recheck it when the LLM shares the box, because that margin isn't large.
