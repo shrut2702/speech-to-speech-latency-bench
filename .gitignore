@@ -16,3 +16,7 @@ raw/
 
 # launch.sh writes per-service logs here
 logs/
+
+# The TTS reference voice is committed: it has to be identical across every run
+# and every machine, or the TTS does different work per trial.
+!assets/prompt.wav

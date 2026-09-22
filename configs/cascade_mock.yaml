@@ -39,7 +39,11 @@ asr:
 llm:
   backend: mock
   max_tokens: 96
-  system_prompt: "Answer in at most two sentences."
+  # Two constraints, both load-bearing. The length cap keeps TTS work constant
+  # across configs. The plain-text rule exists because the answer is going to be
+  # spoken: left alone the model emits LaTeX and markdown on the maths clips,
+  # which no TTS can say, and which crashed CosyVoice's text normalizer.
+  system_prompt: "Answer in at most two sentences. Reply in plain spoken English with no markdown, LaTeX, equations or symbols."
   delays_ms:
     first_token: 150
     per_token: 12

@@ -11,9 +11,6 @@ import json
 import platform
 import subprocess
 from pathlib import Path
-
-import numpy as np
-import soundfile as sf
 import yaml
 
 from .feeder import AudioFeeder
@@ -53,8 +50,11 @@ def save_audio(root: Path, trace: Trace, chunks: list) -> None:
     """
     if not chunks:
         return
-    out = root / trace.config / trace.clip_id / f"trial{trace.trial}"
+    # No config level here: the results folder is already per config.
+    out = root / trace.clip_id / f"trial{trace.trial}"
     out.mkdir(parents=True, exist_ok=True)
+    import numpy as np
+    import soundfile as sf
     sr = chunks[0].sample_rate
     for i, c in enumerate(chunks):
         sf.write(out / f"chunk_{i:03d}.wav", c.samples, c.sample_rate)
@@ -74,10 +74,17 @@ def build_system(cfg: dict) -> S2SSystem:
     raise ValueError(f"unknown system: {kind}")
 
 
-async def run_config(cfg: dict, out_path: Path) -> None:
+async def run_config(
+    cfg: dict,
+    out_path: Path,
+    trials_override: int | None = None,
+    max_clips: int | None = None,
+) -> None:
     manifest = load_manifest(cfg["manifest"])
+    if max_clips is not None and max_clips > 0:
+        manifest = manifest[:max_clips]
     clips_dir = Path(cfg.get("clips_dir", "data/clips"))
-    trials = int(cfg.get("trials", 20))
+    trials = trials_override if trials_override is not None else int(cfg.get("trials", 20))
     frame_ms = int(cfg.get("frame_ms", 20))
     silence_after_s = float(cfg.get("silence_after_s", 20.0))
 
@@ -91,9 +98,20 @@ async def run_config(cfg: dict, out_path: Path) -> None:
     }
 
     system = build_system(cfg)
-    await system.load()
+    try:
+        await system.load()
+        await _run_trials(system, cfg, manifest, out_path, env, frame_ms,
+                          silence_after_s, clips_dir, trials)
+    finally:
+        # Workers are not daemonic, so nothing reaps them if a trial raises.
+        await system.unload()
+
+
+async def _run_trials(system, cfg, manifest, out_path, env, frame_ms,
+                      silence_after_s, clips_dir, trials) -> None:
 
     def make_feeder(row: dict) -> AudioFeeder:
+        import soundfile as sf
         samples, sr = sf.read(clips_dir / row["file"], dtype="float32")
         if samples.ndim > 1:
             samples = samples.mean(axis=1)
@@ -114,6 +132,11 @@ async def run_config(cfg: dict, out_path: Path) -> None:
     # the container. Off by default because a full sweep is a lot of wav files.
     audio_dir = Path(cfg["audio_dir"]) if cfg.get("audio_dir") else None
 
+    # Fresh each run. TraceWriter appends, so a rerun of the same config would
+    # otherwise stack two runs in one file, and check_work_constant would
+    # compare them against each other and call the config inconsistent.
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.unlink(missing_ok=True)
     writer = TraceWriter(out_path)
     for row in manifest:
         for trial in range(trials):
@@ -141,16 +164,32 @@ async def run_config(cfg: dict, out_path: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--out", default=None, help="defaults to results/<name>.jsonl")
-    ap.add_argument("--audio-dir", default=None,
-                    help="save output audio here; overrides audio_dir in the config")
+    ap.add_argument("--results-dir", default="results",
+                    help="a folder per config is created under this")
+    ap.add_argument("--no-audio", action="store_true",
+                    help="skip writing output wavs")
+    ap.add_argument("--trials", type=int, default=None,
+                    help="override number of trials per clip")
+    ap.add_argument("--max-clips", type=int, default=None,
+                    help="limit manifest to first N clips")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
-    if args.audio_dir:
-        cfg["audio_dir"] = args.audio_dir
-    out = Path(args.out) if args.out else Path("results") / f"{cfg['name']}.jsonl"
-    asyncio.run(run_config(cfg, out))
+
+    # Everything one config produces lands together: the traces, which carry the
+    # transcript, the response and the chunks handed to TTS, and the audio those
+    # produced. On Modal point --results-dir at the volume.
+    folder = Path(args.results_dir) / cfg["name"]
+    if not args.no_audio:
+        cfg["audio_dir"] = str(folder / "audio")
+    asyncio.run(
+        run_config(
+            cfg,
+            folder / "traces.jsonl",
+            trials_override=args.trials,
+            max_clips=args.max_clips,
+        )
+    )
 
 
 if __name__ == "__main__":

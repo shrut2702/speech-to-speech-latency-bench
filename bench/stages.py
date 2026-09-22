@@ -61,6 +61,16 @@ class FasterWhisperASR:
         self.model = None
 
     async def load(self) -> None:
+        # CTranslate2 dlopens libcublas.so at runtime. PyTorch bundles it, but 
+        # doesn't always load it globally. We manually load it into the process
+        # so CTranslate2 can find it regardless of LD_LIBRARY_PATH quirks.
+        import ctypes
+        import glob
+        for lib_path in glob.glob("/opt/conda/lib/python3.10/site-packages/nvidia/*/lib/libcublas.so.12*"):
+            ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+        for lib_path in glob.glob("/opt/conda/lib/python3.10/site-packages/nvidia/*/lib/libcudnn.so.*"):
+            ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
+        
         from faster_whisper import WhisperModel
 
         device, _, index = self.device.partition(":")
@@ -70,6 +80,11 @@ class FasterWhisperASR:
             device_index=int(index or 0),
             compute_type=self.compute_type,
         )
+
+    async def warmup(self) -> None:
+        session = _WhisperBatchSession(self)
+        await session.accept(np.zeros(16000, dtype=np.float32))
+        await session.final()
 
     def new_session(self) -> ASRSession:
         return _WhisperBatchSession(self)
@@ -142,6 +157,13 @@ class WhisperStreamingASR:
             modelsize=self.model_name,
             compute_type=self.compute_type,
         )
+
+    async def warmup(self) -> None:
+        session = self.new_session()
+        frame = np.zeros(320, dtype=np.float32)
+        for _ in range(int(2 * self.min_chunk_s * 50)):
+            await session.accept(frame)
+        await session.final()
 
     def new_session(self) -> ASRSession:
         from whisper_online import OnlineASRProcessor
@@ -229,6 +251,9 @@ class MockASR:
     async def load(self) -> None:
         return None
 
+    async def warmup(self) -> None:
+        return None
+
     def new_session(self) -> ASRSession:
         return _MockASRSession(self.final_ms, self.partial_every)
 
@@ -290,6 +315,10 @@ class VLLMEngine:
             )
         )
 
+    async def warmup(self) -> None:
+        async for _ in self.generate("hello", "Answer in at most two sentences."):
+            pass
+
     def _format(self, prompt: str, system: str) -> str:
         messages = ([{"role": "system", "content": system}] if system else [])
         messages.append({"role": "user", "content": prompt})
@@ -344,6 +373,9 @@ class MockLLM:
     async def load(self) -> None:
         return None
 
+    async def warmup(self) -> None:
+        return None
+
     async def generate(
         self, prompt: str, system: str, **params
     ) -> AsyncIterator[str]:
@@ -359,6 +391,31 @@ class MockLLM:
 # --------------------------------------------------------------------------
 # TTS
 # --------------------------------------------------------------------------
+
+def _use_soundfile_for_wavs() -> None:
+    """Points torchaudio.load at soundfile.
+
+    torchaudio 2.9 removed its own decoders and routes load() through
+    torchcodec, ignoring the backend argument CosyVoice passes. torchcodec then
+    has to match both the FFmpeg and the CUDA the container happens to have, and
+    the wheel pip resolves here is built against a newer CUDA than torch is.
+
+    CosyVoice only needs a wav read off disk, which soundfile already does.
+    Patching the one function is smaller than pinning a chain of wheels against
+    each other, and it keeps the TTS stage's audio loading identical to the
+    harness's own.
+    """
+    import soundfile as sf
+    import torch
+    import torchaudio
+
+    def load(path, *args, **kwargs):
+        # torchaudio returns (channels, frames); soundfile gives (frames, channels).
+        audio, sample_rate = sf.read(str(path), dtype="float32", always_2d=True)
+        return torch.from_numpy(audio.T).contiguous(), sample_rate
+
+    torchaudio.load = load
+
 
 class CosyVoice2TTS:
     """The autoregressive codec-LM family.
@@ -381,11 +438,33 @@ class CosyVoice2TTS:
         self.model = None
 
     async def load(self) -> None:
+        import torch
+
         from cosyvoice.cli.cosyvoice import CosyVoice2
 
-        self.model = CosyVoice2(self.model_dir, load_jit=False, load_trt=False)
+        self.model = CosyVoice2(self.model_dir, load_jit=False, load_trt=False, fp16=False)
+        # CosyVoice chooses its own device. A CPU fallback still produces audio,
+        # just many times slower, so it has to be visible rather than looking
+        # like a slow model.
+        device = next(self.model.model.llm.parameters()).device
+        print(f"cosyvoice2 on {device} (cuda available: {torch.cuda.is_available()}, "
+              f"hop {self.model.model.token_hop_len})", flush=True)
+        if device.type != "cuda":
+            raise RuntimeError(f"cosyvoice2 loaded on {device}, every timing would be junk")
 
-    async def synth(self, text: str) -> AsyncIterator[np.ndarray]:
+    async def warmup(self, stream: bool = False) -> None:
+        async for _ in self.synth("Warming up the decoder.", stream=stream):
+            pass
+
+    async def synth(self, text: str, stream: bool = True) -> AsyncIterator[np.ndarray]:
+        # CosyVoice splits the text and runs each piece through wetext. A piece
+        # that normalizes to nothing trips an assertion inside the tokenizer, so
+        # newlines and runs of whitespace are collapsed first: an LLM response
+        # with a line break produces exactly that empty piece.
+        text = " ".join(text.split())
+        if not text:
+            raise RuntimeError("cosyvoice2 got empty text")
+
         queue: asyncio.Queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -395,19 +474,49 @@ class CosyVoice2TTS:
             try:
                 # The reference goes in as a path: the frontend resamples it to
                 # both 16k and 24k itself, so it does its own reading.
-                for out in self.model.inference_zero_shot(
-                    text, self.prompt_text, self.prompt_wav, stream=True
-                ):
+                gen = (
+                    self.model.inference_zero_shot(
+                        text, self.prompt_text, self.prompt_wav, stream=stream
+                    )
+                    if self.prompt_text
+                    else self.model.inference_cross_lingual(
+                        text, self.prompt_wav, stream=stream
+                    )
+                )
+                for out in gen:
                     audio = out["tts_speech"].cpu().numpy().reshape(-1)
                     loop.call_soon_threadsafe(queue.put_nowait, audio)
-            finally:
+            except BaseException as exc:  # noqa: BLE001
+                # Onto the queue, not swallowed. A bare finally here would end
+                # the stream cleanly on failure, and the trial would record a
+                # successful synthesis of no audio.
+                #
+                # Re-raised with the text attached, because the failures that
+                # come out of the text frontend are bare assertions with no
+                # message and the input is the only clue.
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    RuntimeError(f"{type(exc).__name__}: {exc} | text={text!r}"),
+                )
+            else:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
+        import time
+
+        started = time.monotonic()
         loop.run_in_executor(None, produce)
+        produced = 0
         while True:
             piece = await queue.get()
+            if isinstance(piece, BaseException):
+                raise piece
             if piece is None:
+                if not produced:
+                    raise RuntimeError(f"cosyvoice2 returned no audio for {text!r}")
                 return
+            produced += 1
+            print(f"  tts piece {produced}: {(time.monotonic() - started) * 1000:.0f}ms, "
+                  f"{len(piece) / self.sample_rate:.2f}s audio, {len(text)} chars", flush=True)
             yield piece.astype(np.float32, copy=False)
 
 
@@ -437,7 +546,13 @@ class F5TTS:
 
         self.api = F5API(model=self.model_name, device=self.device)
 
-    async def synth(self, text: str) -> AsyncIterator[np.ndarray]:
+    async def warmup(self) -> None:
+        async for _ in self.synth("Warming up the decoder."):
+            pass
+
+    async def synth(self, text: str, stream: bool = True) -> AsyncIterator[np.ndarray]:
+        # Flow matching has nothing to stream, so the flag is accepted and
+        # ignored. The client decides chunk size; the model cannot emit early.
         def run() -> np.ndarray:
             wav, sr, _ = self.api.infer(
                 ref_file=self.ref_wav,
@@ -480,7 +595,11 @@ class MockTTS:
     async def load(self) -> None:
         return None
 
-    async def synth(self, text: str) -> AsyncIterator[np.ndarray]:
+    async def warmup(self) -> None:
+        async for _ in self.synth("warm"):
+            pass
+
+    async def synth(self, text: str, stream: bool = True) -> AsyncIterator[np.ndarray]:
         total_s = max(self.PIECE_S, len(text) * self.seconds_per_char)
         n = max(1, round(total_s / self.PIECE_S))
         samples = np.zeros(int(self.sample_rate * self.PIECE_S), dtype=np.float32)

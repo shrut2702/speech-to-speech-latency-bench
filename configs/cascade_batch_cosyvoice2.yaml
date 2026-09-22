@@ -6,6 +6,7 @@ path: batch
 
 manifest: data/manifest.jsonl
 clips_dir: data/clips
+# Four per clip. Enough for a median that is not one unlucky run.
 trials: 4
 frame_ms: 20
 # The mic keeps running while the user waits for an answer. Full-duplex models
@@ -15,18 +16,17 @@ frame_ms: 20
 silence_after_s: 20.0
 output_sample_rate: 24000
 
-# One container, several GPUs, one process. Stages are objects on separate
-# devices rather than services behind a socket: a benchmark is a job, not a
-# production deployment, and a network hop between stages would land inside the
-# number being measured.
+# One container, three GPUs, three processes. A process per stage in every
+# config, including this one where nothing overlaps, so the paths differ only in
+# what they overlap and not in how they are hosted. Each worker pins itself to
+# its card with CUDA_VISIBLE_DEVICES and then sees a single device.
 #
-# vLLM takes cuda:0 and has no clean per-instance device argument, so the other
-# stages sit above it. Placement is recorded into every trace, so a one-GPU run
-# and a three-GPU run can never be compared by accident.
+# Placement is recorded into every trace, so runs on different layouts can never
+# be compared by accident.
 devices:
-  llm: cuda:0
-  asr: cuda:1
-  tts: cuda:2
+  llm: 0
+  asr: 1
+  tts: 2
 
 asr:
   backend: faster-whisper
@@ -41,10 +41,25 @@ llm:
   temperature: 0.0
   seed: 0
   max_tokens: 96
-  system_prompt: "Answer in at most two sentences."
+  # Two constraints, both load-bearing. The length cap keeps TTS work constant
+  # across configs. The plain-text rule exists because the answer is going to be
+  # spoken: left alone the model emits LaTeX and markdown on the maths clips,
+  # which no TTS can say, and which crashed CosyVoice's text normalizer.
+  system_prompt: "Answer in at most two sentences. Reply in plain spoken English with no markdown, LaTeX, equations or symbols."
 
 tts:
   family: ar
   backend: cosyvoice2
+  # Run the TTS worker under its own venv so CosyVoice's numpy<2 constraint
+  # is isolated from vLLM, which requires numpy>=2.
+  venv_python: /opt/tts-venv/bin/python
+  # CosyVoice2's own pipeline, both here and in the streaming configs. The
+  # process-split variant in research/ is faster but is not what the model
+  # ships, and the benchmark reports what ships.
+  model: iic/CosyVoice2-0.5B
+  # Zero-shot needs a reference voice, fixed across every trial: a different
+  # speaker means different durations and so different TTS work.
+  prompt_wav: assets/prompt.wav
+  prompt_text: ""
   # Autoregressive codec-LM. Emits acoustic tokens continuously and the codec
   # decodes them incrementally, so audio can start mid-chunk.

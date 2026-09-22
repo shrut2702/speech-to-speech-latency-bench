@@ -1,0 +1,9 @@
+{
+  "source": "hlt-lab/voicebench wildvoice",
+  "conversation_hash": "bc81b9bf75a1635cd60ee8bccf6ef063",
+  "shard": "wildvoice/test/0000.parquet",
+  "sample_rate": 48000,
+  "duration_s": 2.94,
+  "transcript": "Can you do a script about Shawn Elliott vs. Clemson State?",
+  "trimmed": "Silence removed. CosyVoice infers speaking rate from the prompt, so 1.18s of leading and 1.02s of trailing silence made the speaker look slow and the model stretched every response to match, hitting its token ceiling at ~32s of audio for 150 characters of text."
+}

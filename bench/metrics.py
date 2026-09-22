@@ -72,7 +72,7 @@ class TrialMetrics:
     decoder_total_ms: float | None = None
 
     response_audio_s: float | None = None
-    rtf: float | None = None                # generation time / audio produced
+    rtf: float | None = None                # synthesis wall time / audio produced
     max_gap_ms: float | None = None         # worst inter-chunk gap
     underruns: int | None = None            # gaps that would be audible
 
@@ -144,11 +144,15 @@ def trial_metrics(trace: Trace, underrun_gap_ms: float = 50.0) -> TrialMetrics:
         produced = sum(c.meta.get("duration_s", 0.0) for c in chunks)
         m.response_audio_s = produced or None
 
-        t_first = chunks[0].t
+        # From when synthesis could begin, not from when the first chunk
+        # arrived. Measuring from the first chunk leaves that chunk's audio in
+        # the denominator while its synthesis time is not in the numerator, and
+        # on the batch path there is only one chunk, so the span collapses to
+        # zero and every run reports rtf 0.
         t_end = trace.first(OUTPUT_END) or chunks[-1].t
-        gen_time = t_end - t_first
+        t_start = trace.first(TTS_START) or chunks[0].t
         if produced > 0:
-            m.rtf = gen_time / produced
+            m.rtf = (t_end - t_start) / produced
 
         # Gaps between consecutive chunks arriving. A gap longer than the audio
         # already buffered is what the listener hears as a stutter.

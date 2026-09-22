@@ -42,9 +42,18 @@ llm:
   temperature: 0.0
   seed: 0
   max_tokens: 96
-  system_prompt: "Answer in at most two sentences."
+  # Two constraints, both load-bearing. The length cap keeps TTS work constant
+  # across configs. The plain-text rule exists because the answer is going to be
+  # spoken: left alone the model emits LaTeX and markdown on the maths clips,
+  # which no TTS can say, and which crashed CosyVoice's text normalizer.
+  system_prompt: "Answer in at most two sentences. Reply in plain spoken English with no markdown, LaTeX, equations or symbols."
 
 tts:
+  # Zero-shot needs a reference voice and its transcript, fixed across every
+  # trial: a different speaker means different durations and so different TTS
+  # work. This one is wildvoice bc81b9bf from VoiceBench, English, 5.0s.
+  prompt_wav: assets/prompt.wav
+  prompt_text: "Can you do a script about Shawn Elliott vs. Clemson State?"
   family: nar
   backend: f5
   # Flow matching. Nothing to stream: the solver has to finish a chunk before

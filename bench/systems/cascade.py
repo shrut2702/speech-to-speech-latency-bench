@@ -9,9 +9,12 @@ Three paths, selected by config:
   stream_all   ASR also runs incrementally during speech, so when the endpoint
                arrives only a short finalize remains.
 
-Stages are plain objects on separate GPUs, not services. A benchmark is a job,
-not a production deployment, so putting a network hop between the stages would
-only add it to the number being measured.
+Each stage runs in its own process on its own GPU. Not for deployment realism:
+Python threads share one interpreter lock, so in a single process the LLM and
+the TTS would take turns rather than overlap, and the streaming paths exist
+precisely to overlap them. Profiling CosyVoice2 measured that cost directly.
+Every config uses the same three processes, including `batch` where nothing
+overlaps, so the paths differ only in what they overlap.
 
 Chunking is uneven on purpose. The first chunk is cut small to get audio
 started; everything after is sentence-sized. Only the first chunk's synthesis
@@ -27,7 +30,6 @@ from typing import AsyncIterator
 
 import numpy as np
 
-from .. import stages
 from ..chunking import ChunkPolicy
 from ..feeder import AudioFeeder
 from ..trace import (
@@ -46,6 +48,7 @@ from ..trace import (
     OUTPUT_CHUNK,
     OUTPUT_END,
 )
+from ..workers import StageWorker, start_all
 from .base import AudioChunk, S2SSystem, drain_to_endpoint
 
 PATHS = ("batch", "stream_gen", "stream_all")
@@ -59,23 +62,20 @@ class CascadeSystem(S2SSystem):
             raise ValueError(f"path must be one of {PATHS}")
         self.name = cfg.get("name", f"cascade_{self.path}")
         self.devices = cfg.get("devices", {})
-        self.asr = stages.build("asr", cfg["asr"], self.devices)
-        self.llm = stages.build("llm", cfg["llm"], self.devices)
-        self.tts = stages.build("tts", cfg["tts"], self.devices)
+        self.asr = StageWorker("asr", cfg["asr"], self.devices.get("asr"))
+        self.llm = StageWorker("llm", cfg["llm"], self.devices.get("llm"))
+        self.tts = StageWorker("tts", cfg["tts"], self.devices.get("tts"))
         self.out_sr = int(cfg.get("output_sample_rate", 24000))
+        # Batch synthesizes the whole response in one call. Streaming asks the
+        # TTS to emit as it goes, which only an AR family can actually do.
+        self.tts_stream = self.path != "batch"
 
     async def load(self) -> None:
-        for stage in (self.asr, self.llm, self.tts):
-            await stage.load()
-        self.out_sr = getattr(self.tts, "sample_rate", self.out_sr)
+        await start_all([self.asr, self.llm, self.tts])
 
-        # A config claiming one TTS family while another is loaded would put one
-        # family's numbers under the other's name and invert the comparison the
-        # grid exists for.
-        want = self.cfg["tts"].get("family")
-        got = getattr(self.tts, "family", None)
-        if want and got and want != got:
-            raise ValueError(f"config says tts family {want!r}, loaded {got!r}")
+    async def unload(self) -> None:
+        for worker in (self.asr, self.llm, self.tts):
+            await worker.stop()
 
     async def run(
         self, feeder: AudioFeeder, trace: Trace
@@ -107,8 +107,7 @@ class CascadeSystem(S2SSystem):
         an out-of-band signal a live system never receives, and waiting for it
         would add the whole trailing-silence pad to every measurement.
         """
-        session = self.asr.new_session()
-        saw_partial = False
+        await self.asr.call("asr_open")
         started = False
         # When transcription actually begins, which differs by path. Streaming
         # starts on the first frame because its whole point is the work done
@@ -117,24 +116,27 @@ class CascadeSystem(S2SSystem):
         incremental = self.path == "stream_all"
 
         async def on_frame(frame) -> None:
-            nonlocal saw_partial, started
+            nonlocal started
             if incremental and not started:
                 started = True
                 trace.mark(ASR_START)
-            partial = await session.accept(frame.samples)
-            # Only the incremental path has a meaningful partial. A batch
-            # backend that offers one is not doing the work early, and timing it
-            # against a finalize-time start would read as negative.
-            if incremental and partial and not saw_partial:
-                saw_partial = True
-                trace.mark(ASR_FIRST_PARTIAL)
+            # Frames are fire and forget. At 50 a second, a round trip each
+            # would cost more than the work does.
+            self.asr.send("asr_frame", frame.samples)
 
         tail = await drain_to_endpoint(feeder, trace, on_frame)
 
         if not incremental:
             trace.mark(ASR_START)
-        transcript = await session.final()
+        transcript = await self.asr.call("asr_final")
         trace.mark(ASR_FINAL, n_chars=len(transcript))
+
+        # Partials arrive out of band, already stamped by the ASR process. Only
+        # the incremental path produces one that means anything: a batch backend
+        # offering a partial is not doing the work early.
+        partials = [t for kind, t in self.asr.drain_events() if kind == "partial"]
+        if incremental and partials:
+            trace.mark_at(ASR_FIRST_PARTIAL, min(partials))
         trace.artifacts["transcript"] = transcript
         return transcript, tail
 
@@ -158,7 +160,7 @@ class CascadeSystem(S2SSystem):
         """Nothing overlaps. Full response, then full synthesis, then audio."""
         parts: list[str] = []
         trace.mark(LLM_START)
-        async for token in self.llm.generate(transcript, **self._llm_params()):
+        async for token in self.llm.stream("llm", {"prompt": transcript, **self._llm_params()}):
             if not parts:
                 trace.mark(LLM_FIRST_TOKEN)
             elif len(parts) == 1:
@@ -203,8 +205,8 @@ class CascadeSystem(S2SSystem):
             n = 0
             trace.mark(LLM_START)
             try:
-                async for token in self.llm.generate(
-                    transcript, **self._llm_params()
+                async for token in self.llm.stream(
+                    "llm", {"prompt": transcript, **self._llm_params()}
                 ):
                     if not n:
                         trace.mark(LLM_FIRST_TOKEN)
@@ -248,7 +250,9 @@ class CascadeSystem(S2SSystem):
             # measured from when synthesis could begin rather than from t=0.
             trace.mark(TTS_START)
         first = True
-        async for audio in self.tts.synth(text):
+        async for audio in self.tts.stream(
+            "tts", {"text": text, "stream": self.tts_stream}
+        ):
             if first and index == 0:
                 trace.mark(TTS_FIRST_CHUNK)
             first = False
