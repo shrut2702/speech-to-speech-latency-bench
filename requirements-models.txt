@@ -1,15 +1,24 @@
-# Container side. Installed by the Dockerfile, never on your laptop.
+# Container side. Never installed on your laptop.
 #
-# Everything runs in one process in one container, so these share an
-# environment. If the torch pins collide, split only the offending stage into a
-# subprocess with its own venv rather than reintroducing a service layer.
--r requirements.txt
-
+# This file is a record of what the container holds, not the thing that builds
+# it. modal_app.py declares the image, because the install is not a flat list:
+# CosyVoice needs numpy 1 and vLLM needs numpy 2, so the TTS stage gets its own
+# venv, and several CUDA runtime libraries have to be pinned by soname.
+#
+# Base environment, shared by the ASR and LLM workers:
 faster-whisper>=1.0
 vllm>=0.6
 transformers>=4.51
-moshi>=0.2
-torch>=2.4
-# f5-tts>=1.0
-# cosyvoice2 installs from the CosyVoice repo, not PyPI
-# whisper-streaming is a repo: clone ufal/whisper_streaming onto PYTHONPATH
+librosa>=0.10.2       # whisper_streaming imports it at module scope
+modelscope
+
+# TTS venv, built from CosyVoice's own requirements.txt under numpy<2:
+# https://github.com/FunAudioLLM/CosyVoice
+#
+# Cloned repos rather than packages, both on PYTHONPATH:
+#   FunAudioLLM/CosyVoice        the TTS
+#   ufal/whisper_streaming       the stream_all ASR policy
+#
+# Not wired up yet:
+#   f5-tts
+#   moshi
