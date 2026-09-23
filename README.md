@@ -86,7 +86,7 @@ audio/<clip_id>/trial<N>/chunk_000.wav   as it arrived
                          full.wav
 ```
 
-For the streaming paths the per-chunk files are the point: they make the gap and underrun numbers listenable. Batch produces one chunk, so both files hold the same audio. Everything lands in a folder per config on the Modal results Volume, committed after each config so a crash keeps whatever finished. Writes happen after a trial ends, never inside it, since a disk write mid-stream would land in the gaps being measured.
+
 
 ## Usage
 
@@ -123,8 +123,4 @@ modal run modal_app.py                                    # the whole sweep
 
 `--sample-only` is one clip, one trial, for shaking a config out. Weights cache to a Volume so they download once.
 
-## Reading the results honestly
 
-The cascade's answer quality is its LLM's quality, so swapping the 4B for an 8B moves it while Moshi stays put. Nothing here measures an intrinsic property of cascades versus end to end models. The useful output is a latency and quality frontier across configurations, not a two-row table.
-
-Stage placement changes the answer too. Put the LLM and TTS on one card and they contend for the GPU exactly when the streaming paths need them to overlap. Spread them and the cascade gets more hardware per session than Moshi, which runs as one model on one card. Report GPUs per session alongside latency, and above one concurrent session report sessions per GPU at a latency target.
