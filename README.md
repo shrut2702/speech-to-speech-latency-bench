@@ -38,7 +38,7 @@ A worker sets `CUDA_VISIBLE_DEVICES` before torch is imported, so it sees one ca
 
 ## Clips
 
-Audio is not committed, for licensing reasons. `fetch_clips.py` pulls the set from HuggingFace and `prepare_clips.py` normalizes it, so both regenerate from scratch.
+Audio is not committed, for licensing reasons. `fetch_clips.py` pulls the set from HuggingFace and `prepare_clips.py` normalizes it, so both regenerate from scratch. The prepared set is also [on Drive](https://drive.google.com/file/d/1FhFq_Aem4s7N6yoJWVVTe4mi680bG1AT/view?usp=sharing) if you would rather not rebuild it: unzip into `data/clips/`.
 
 45 clips from three sources, 15 each:
 
