@@ -15,7 +15,7 @@ silence_after_s: 20.0
 output_sample_rate: 24000
 
 devices:
-  moshi: cuda:0
+  moshi: 0
 
 model:
   backend: kyutai

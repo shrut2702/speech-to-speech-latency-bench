@@ -21,13 +21,14 @@ output_sample_rate: 24000
 # production deployment, and a network hop between stages would land inside the
 # number being measured.
 #
-# vLLM takes cuda:0 and has no clean per-instance device argument, so the other
-# stages sit above it. Placement is recorded into every trace, so a one-GPU run
+# A card index per stage, not a torch device string: the worker exports it as
+# CUDA_VISIBLE_DEVICES before torch is imported, so each process sees one card
+# and calls it cuda:0. Placement is recorded into every trace, so a one-GPU run
 # and a three-GPU run can never be compared by accident.
 devices:
-  llm: cuda:0
-  asr: cuda:1
-  tts: cuda:2
+  llm: 0
+  asr: 1
+  tts: 2
 
 asr:
   backend: faster-whisper
@@ -64,5 +65,8 @@ tts:
   # everything after it hides inside the playback of the chunk before, so it can
   # be long enough to sound right. Worth sweeping, and it matters more for the
   # NAR family, which has no token streaming to fall back on.
-  first_chunk_words: 4
+  first_chunk_words: 8
+  # Punctuation below this is ignored, so a sentence that ends two words
+  # in is absorbed instead of becoming its own clipped chunk.
+  min_chunk_words: 6
   max_chunk_words: 40

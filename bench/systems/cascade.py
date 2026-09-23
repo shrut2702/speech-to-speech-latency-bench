@@ -199,7 +199,8 @@ class CascadeSystem(S2SSystem):
 
         async def produce_text() -> None:
             policy = ChunkPolicy(
-                first_chunk_words=int(tts_cfg.get("first_chunk_words", 4)),
+                first_chunk_words=int(tts_cfg.get("first_chunk_words", 8)),
+                min_words=int(tts_cfg.get("min_chunk_words", 6)),
                 max_words=int(tts_cfg.get("max_chunk_words", 40)),
             )
             n = 0

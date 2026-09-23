@@ -51,7 +51,10 @@ llm:
 tts:
   backend: mock
   family: nar
-  first_chunk_words: 4
+  first_chunk_words: 8
+  # Punctuation below this is ignored, so a sentence that ends two words
+  # in is absorbed instead of becoming its own clipped chunk.
+  min_chunk_words: 6
   max_chunk_words: 40
   rtf: 0.3
   delays_ms:

@@ -17,18 +17,38 @@ def test_first_chunk_is_short_and_the_rest_are_sentences():
         "The capital of France is Paris. It has been the capital since 508.",
     )
     assert chunks[0] == "The capital of France"
-    assert chunks[1] == "is Paris."
-    assert chunks[2] == "It has been the capital since 508."
+    assert chunks[1] == "is Paris. It has been the capital since 508."
 
 
 def test_first_chunk_cuts_at_a_clause_when_one_arrives_sooner():
-    # Waiting for the fourth word would delay audio for no reason when the
+    # Waiting for the tenth word would delay audio for no reason when the
     # phrase already ended.
     chunks = feed_words(
-        ChunkPolicy(first_chunk_words=6),
-        "Paris, the capital of France, is large.",
+        ChunkPolicy(first_chunk_words=10, min_words=3),
+        "The capital of France, which is Paris, is a large city.",
     )
-    assert chunks[0] == "Paris,"
+    assert chunks[0] == "The capital of France,"
+
+
+def test_a_decimal_point_is_not_a_sentence():
+    # The buffer ends wherever the last token landed, so "2." looked like a
+    # finished sentence until the next token arrived.
+    chunks = feed_words(
+        ChunkPolicy(first_chunk_words=20),
+        "It takes about 2.5 minutes, or 1,000 seconds at worst.",
+    )
+    assert chunks[0].startswith("It takes about 2.5 minutes")
+
+
+def test_a_sentence_that_ends_too_soon_is_absorbed():
+    # "He needs 90." on its own is a two-word chunk: clipped to listen to and
+    # a whole TTS call for nothing.
+    chunks = feed_words(
+        ChunkPolicy(first_chunk_words=4, min_words=6),
+        "Jason eats 3 eggs each morning. He needs 90. That is a lot of eggs.",
+    )
+    assert chunks[0] == "Jason eats 3 eggs"
+    assert all(len(c.split()) >= 6 for c in chunks[1:-1])
 
 
 def test_only_the_first_chunk_is_cut_short():
