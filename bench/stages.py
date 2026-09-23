@@ -152,11 +152,12 @@ class WhisperStreamingASR:
         # onto PYTHONPATH. Its backend class shares a name with ours.
         from whisper_online import FasterWhisperASR as _Backend
 
-        self.asr = _Backend(
-            lan=self.language,
-            modelsize=self.model_name,
-            compute_type=self.compute_type,
-        )
+        # Only lan and modelsize are accepted. whisper-streaming hardcodes
+        # compute_type float16 and beam_size 5 inside its own backend, so those
+        # are its settings, not ours. float16 matches the batch config; beam 5
+        # does not, and that difference is the library's, left alone because the
+        # benchmark reports what each one ships.
+        self.asr = _Backend(lan=self.language, modelsize=self.model_name)
 
     async def warmup(self) -> None:
         session = self.new_session()

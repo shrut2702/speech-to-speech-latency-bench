@@ -82,6 +82,9 @@ image = (
         "faster-whisper>=1.0", "vllm>=0.6", "transformers>=4.51",
         "modelscope", "soundfile>=0.12", "soxr>=0.5", "pyyaml>=6.0",
     )
+    # whisper_streaming's whisper_online.py imports librosa at module scope,
+    # only to resample. Its own layer so adding it does not re-resolve vLLM.
+    .pip_install("librosa>=0.10.2")
     # CosyVoice's requirements and vLLM's pull different nvidia-cudnn-cu12
     # versions, leaving two libcudnn.so.x side by side. Nothing notices until
     # vLLM probes FlashInfer while choosing an attention backend, whose import
