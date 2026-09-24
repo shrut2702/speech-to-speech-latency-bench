@@ -48,6 +48,18 @@ cache = modal.Volume.from_name("s2s-models", create_if_missing=True)
 out = modal.Volume.from_name("s2s-results", create_if_missing=True)
 
 
+def hops(cosyvoice, when: str) -> None:
+    """The chunk schedule, printed where it is read.
+
+    token_hop_len doubles in place during streaming and is not reset
+    between utterances, so what it holds depends on what ran before.
+    """
+    m = cosyvoice.model
+    print("[%s] token_hop_len=%s pre_lookahead_len=%s max_token_hop_len=%s"
+          % (when, m.token_hop_len, m.flow.pre_lookahead_len,
+             getattr(m, "max_token_hop_len", None)), flush=True)
+
+
 def instrument(cosyvoice, events: list) -> None:
     """Times the LM and the decoder apart.
 
@@ -146,6 +158,8 @@ def synth(
     model_dir = snapshot_download(MODEL, local_dir=f"/cache/{MODEL}")
     cosyvoice = CosyVoice2(model_dir, load_jit=False, load_trt=False, fp16=False)
 
+    hops(cosyvoice, "loaded")
+
     if split:
         split_devices(cosyvoice)
 
@@ -160,6 +174,7 @@ def synth(
         ):
             pass
         print("warmed", flush=True)
+        hops(cosyvoice, "after warmup")
 
     events: list = []
     instrument(cosyvoice, events)
@@ -205,10 +220,19 @@ def synth(
 def main(
     # Three sentences, so streaming has something to chunk. One sentence yields
     # a single piece and tells you nothing about how the chunks arrive.
+    # text: str = (
+    #     "The capital of France is Paris. "
+    #     "It has been the seat of government since the tenth century. "
+    #     "Today it is home to just over two million people."
+    # ),
     text: str = (
-        "The capital of France is Paris. "
-        "It has been the seat of government since the tenth century. "
-        "Today it is home to just over two million people."
+         "Photosynthesis converts light energy into chemical energy. "
+         "Plants absorb sunlight through chlorophyll in their leaves, "
+         "then use that energy to combine carbon dioxide from the air with water drawn up from the roots. "
+         "The result is glucose, which the plant uses for growth, and oxygen, "
+         "which is released back into the atmosphere. "
+         "Almost every food chain on the planet starts with this reaction, "
+         "which is why a change in plant cover affects far more than the plants themselves."
     ),
     stream: bool = False,
     # Defaults to the repo's own asset so this runs with no setup. That speaker
@@ -221,3 +245,6 @@ def main(
     split: bool = False,
 ):
     print("\n".join(synth.remote(text, stream, prompt_wav, prompt_text, warmup, split)))
+
+
+
