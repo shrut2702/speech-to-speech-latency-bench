@@ -184,6 +184,28 @@ def collect(replies, sink, events) -> None:
 
 
 def run_split(cosyvoice, text, prompt_wav, requests, replies, events):
+    """One piece at a time, the way inference_cross_lingual does it.
+
+    The library splits English text into 60 to 80 token pieces and runs each
+    through the LM and the decoder in turn. Feeding the whole paragraph as one
+    sequence would be a different workload, and a faster one, since it never
+    pays the gap between pieces.
+    """
+    audio: list = []
+    # Carried across pieces deliberately. CosyVoice2Model.tts grows
+    # self.token_hop_len and never puts it back, so piece two starts at
+    # whatever piece one left behind, with a first chunk four times larger.
+    # Replicated here so the arms stay comparable. Resetting it is a fix to
+    # send upstream, not one to quietly take credit for.
+    state = {"hop": cosyvoice.model.token_hop_len}
+    for piece in cosyvoice.frontend.text_normalize(text, split=True):
+        run_piece(cosyvoice, piece, prompt_wav, requests, replies, events,
+                  audio, state)
+    return audio
+
+
+def run_piece(cosyvoice, text, prompt_wav, requests, replies, events,
+              audio, state):
     """Our own streaming loop, in place of CosyVoiceModel.tts().
 
     The library's version runs the LM on a thread and polls a shared list every
@@ -205,18 +227,31 @@ def run_split(cosyvoice, text, prompt_wav, requests, replies, events):
 
     requests.put(("prompt", move({k: inputs[k] for k in PROMPT_KEYS}, "cpu")))
 
-    audio: list = []
+    start = len(audio)
     reader = threading.Thread(target=collect, args=(replies, audio, events))
     reader.start()
 
-    # The hop doubles after each chunk, which is what produced the library's
-    # 1.36s, 2.0s, 4.0s chunks. It has to be copied rather than simplified: each
-    # decode recomputes all preceding tokens, so holding the hop fixed triples
-    # the number of passes and the decoder ends up doing far more total work
-    # than the baseline it is being compared against.
-    hop = model.token_hop_len
+    # The chunk schedule, copied from CosyVoice2Model.tts rather than
+    # simplified. Each decode re-runs the whole sequence and trims by
+    # token_offset, so a different schedule means a different amount of decoder
+    # work and the comparison stops being like for like.
+    #
+    # The first chunk is longer than the rest. The flow decoder blocks the
+    # sequence in token_hop_len-sized pieces counted from the first *prompt*
+    # token, and a prompt rarely ends on a block boundary, so the first
+    # generated chunk absorbs the remainder and everything after it lands
+    # cleanly. Omitting this pad makes first audio look faster than the
+    # library's for no reason other than a smaller first chunk.
     lookahead = model.flow.pre_lookahead_len
-    max_hop = getattr(model, "max_token_hop_len", 200)
+    base = state["hop"]                           # 25, then whatever the
+                                                  # previous piece left
+    scale = model.stream_scale_factor             # 2
+    max_hop = model.token_max_hop_len             # 4 * 25
+    prompt_len = inputs["flow_prompt_speech_token"].shape[1]
+    pad = (-prompt_len) % base
+    hop = base + pad
+    print("[run_split] hop=%s (base %s + pad %s) lookahead=%s max_hop=%s"
+          % (hop, base, pad, lookahead, max_hop), flush=True)
 
     tokens: list = []
     token_offset = 0
@@ -259,23 +294,26 @@ def run_split(cosyvoice, text, prompt_wav, requests, replies, events):
                 ("chunk", (tokens[: token_offset + hop + lookahead], token_offset, False))
             )
             token_offset += hop
-            hop = min(hop * 2, max_hop)
+            # The library grows its own token_hop_len and uses the grown value
+            # from the next chunk on, so the pad applies once and never again.
+            base = min(base * scale, max_hop)
+            hop = base
             sent += 1
 
     events.append((f"llm last token ({len(tokens)})", time.monotonic()))
     requests.put(("chunk", (tokens, token_offset, True)))
     sent += 1
 
-    # Everything is dispatched; wait for the audio to come back.
-    expected = sent
+    state["hop"] = base
+
+    # Everything is dispatched; wait for this piece's audio to come back.
     deadline = time.monotonic() + 300
-    while len(audio) < expected:
+    while len(audio) - start < sent:
         if time.monotonic() > deadline:
-            raise RuntimeError(f"got {len(audio)} of {expected} chunks back")
+            raise RuntimeError(f"got {len(audio) - start} of {sent} chunks back")
         time.sleep(0.005)
     replies.put(("stop", None))
     reader.join(timeout=5)
-    return audio
 
 
 # Two cards requested so the decoder can be pinned to the second one. With
@@ -312,6 +350,8 @@ def synth(text: str, prompt_wav: str, warmup: bool, decoder_gpu: int | None) -> 
         # there just as the LM's first token does here.
         run_split(cosyvoice, "Warming up.", prompt_wav, requests, replies, [])
         print("warmed", flush=True)
+        print("[after warmup] token_hop_len=%s" % cosyvoice.model.token_hop_len,
+              flush=True)
 
     events: list = []
     t0 = time.monotonic()
@@ -340,10 +380,19 @@ def synth(text: str, prompt_wav: str, warmup: bool, decoder_gpu: int | None) -> 
 @app.local_entrypoint()
 def main(
     text: str = (
-        "The capital of France is Paris. "
-        "It has been the seat of government since the tenth century. "
-        "Today it is home to just over two million people."
-    ),
+            "The capital of France is Paris. "
+            "It has been the seat of government since the tenth century. "
+            "Today it is home to just over two million people."
+        ),
+    # text: str = (
+    #          "Photosynthesis converts light energy into chemical energy. "
+    #          "Plants absorb sunlight through chlorophyll in their leaves, "
+    #          "then use that energy to combine carbon dioxide from the air with water drawn up from the roots. "
+    #          "The result is glucose, which the plant uses for growth, and oxygen, "
+    #          "which is released back into the atmosphere. "
+    #          "Almost every food chain on the planet starts with this reaction, "
+    #          "which is why a change in plant cover affects far more than the plants themselves."
+    # ),
     prompt_wav: str = f"{REPO}/asset/zero_shot_prompt.wav",
     warmup: bool = False,
     # Which card the decoder process gets. Leave it and the decoder shares
